@@ -1,0 +1,98 @@
+name: Discover changed Verentis packages
+
+on:
+  workflow_call:
+    inputs:
+      base-sha:
+        description: Base commit used to identify changed files; empty selects every package
+        required: false
+        default: ''
+        type: string
+      shared-paths:
+        description: Newline-separated repository paths that affect every package
+        required: false
+        default: |-
+          .github/
+          package.json
+          package-lock.json
+        type: string
+    outputs:
+      matrix:
+        description: JSON matrix containing package-root and manifest entries
+        value: ${{ jobs.discover.outputs.matrix }}
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.packages.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build changed-package matrix
+        id: packages
+        env:
+          BASE_SHA: ${{ inputs.base-sha }}
+          SHARED_PATHS: ${{ inputs.shared-paths }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t manifests < <(
+            find . -type f \( -name '*.app.yaml' -o -name '*.engine.yaml' \) \
+              -not -path './.git/*' -not -path '*/node_modules/*' | sort
+          )
+
+          if [[ -n "$BASE_SHA" ]]; then
+            mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD)
+          else
+            changed=()
+          fi
+
+          shared_changed=false
+          if [[ -n "$BASE_SHA" ]]; then
+            while IFS= read -r shared; do
+              [[ -z "$shared" ]] && continue
+              for path in "${changed[@]}"; do
+                if [[ "$path" == "$shared" || "$path" == "$shared"* ]]; then
+                  shared_changed=true
+                  break 2
+                fi
+              done
+            done <<< "$SHARED_PATHS"
+          fi
+
+          include='[]'
+          for manifest in "${manifests[@]}"; do
+            manifest="${manifest#./}"
+            package_root=$(dirname "$manifest")
+            selected=false
+
+            if [[ -z "$BASE_SHA" || "$shared_changed" == true ]]; then
+              selected=true
+            else
+              for path in "${changed[@]}"; do
+                if [[ "$path" == "$package_root/"* || "$path" == "$manifest" ]]; then
+                  selected=true
+                  break
+                fi
+              done
+            fi
+
+            if [[ "$selected" == true ]]; then
+              include=$(jq -c \
+                --arg root "$package_root" \
+                --arg manifest "$(basename "$manifest")" \
+                '. + [{"package-root": $root, "manifest": $manifest}]' \
+                <<< "$include")
+            fi
+          done
+
+          matrix=$(jq -c -n --argjson include "$include" '{include: $include}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"

@@ -1,0 +1,48 @@
+name: Validate Verentis package
+
+on:
+  workflow_call:
+    inputs:
+      package-root:
+        description: Package root relative to the repository
+        required: true
+        type: string
+      manifest:
+        description: Manifest path relative to the package root
+        required: true
+        type: string
+      overlay:
+        description: Optional overlay path relative to the package root
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Verentis CLI
+        run: npm install --global @verentis/cli --registry=https://registry.npmjs.org --@verentis:registry=https://registry.npmjs.org
+
+      - name: Validate package
+        working-directory: ${{ inputs.package-root }}
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          OVERLAY: ${{ inputs.overlay }}
+        run: |
+          set -euo pipefail
+          test -f "$MANIFEST"
+          args=(validate .)
+          if [[ -n "$OVERLAY" ]]; then args+=(--overlay "$OVERLAY"); fi
+          verentis "${args[@]}"

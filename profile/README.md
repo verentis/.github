@@ -1,4 +1,10 @@
-## Hi there 👋
+# Verentis
+
+Verentis is a workspace platform for installable applications, execution engines, and reusable content.
+
+Repository boundaries follow ownership, source visibility, release coordination, and handover needs rather
+than requiring artifact-type suffixes. See the
+[repository structure policy](REPOSITORY-STRUCTURE.md) for the organization model and naming rules.
 
 <!--
 

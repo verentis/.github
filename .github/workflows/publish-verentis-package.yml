@@ -1,0 +1,111 @@
+name: Publish Verentis package
+
+on:
+  workflow_call:
+    inputs:
+      package-root:
+        description: Package root relative to the repository
+        required: true
+        type: string
+      manifest:
+        description: Manifest path relative to the package root
+        required: true
+        type: string
+      overlay:
+        description: Optional overlay path relative to the package root
+        required: false
+        default: ''
+        type: string
+      version:
+        description: Package version; empty derives major.minor.github-run-number from the manifest
+        required: false
+        default: ''
+        type: string
+      visibility:
+        description: Marketplace visibility for a newly created package
+        required: false
+        default: Private
+        type: string
+      api-url:
+        description: Verentis API URL
+        required: true
+        type: string
+    secrets:
+      api-key:
+        description: Verentis publisher API key
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate visibility
+        env:
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          if [[ "$VISIBILITY" != "Private" && "$VISIBILITY" != "Public" ]]; then
+            echo "visibility must be Private or Public" >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Verentis CLI
+        run: npm install --global @verentis/cli --registry=https://registry.npmjs.org --@verentis:registry=https://registry.npmjs.org
+
+      - name: Resolve package version
+        id: version
+        working-directory: ${{ inputs.package-root }}
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$VERSION_INPUT"
+          if [[ -z "$version" ]]; then
+            base_version=$(awk '/^metadata:/{m=1} m && /^[[:space:]]+version:/{v=$2; gsub(/["'\'' ]/,"",v); print v; exit}' "$MANIFEST")
+            if [[ ! "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Could not read metadata.version from $MANIFEST" >&2
+              exit 1
+            fi
+            version="${base_version%.*}.${{ github.run_number }}"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Validate and pack
+        working-directory: ${{ inputs.package-root }}
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          OVERLAY: ${{ inputs.overlay }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          test -f "$MANIFEST"
+          validate_args=(validate .)
+          pack_args=(pack . --manifest "$MANIFEST" --set-version "$VERSION" --out .vpkg-out --no-sign)
+          if [[ -n "$OVERLAY" ]]; then
+            validate_args+=(--overlay "$OVERLAY")
+            pack_args+=(--overlay "$OVERLAY")
+          fi
+          verentis "${validate_args[@]}"
+          verentis "${pack_args[@]}"
+
+      - name: Publish
+        working-directory: ${{ inputs.package-root }}
+        env:
+          API_KEY: ${{ secrets.api-key }}
+          API_URL: ${{ inputs.api-url }}
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          set -euo pipefail
+          verentis login --api-url "$API_URL" --api-key "$API_KEY"
+          verentis publish .vpkg-out/*.vpkg --visibility "$VISIBILITY"
