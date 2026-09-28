@@ -1,0 +1,187 @@
+name: Publish signed Sprint package
+
+on:
+  workflow_call:
+    inputs:
+      package-root:
+        required: true
+        type: string
+      manifest:
+        required: true
+        type: string
+      overlay:
+        required: false
+        default: ''
+        type: string
+      visibility:
+        required: false
+        default: Private
+        type: string
+      build-target:
+        description: Empty for no build, root for npm run build, or an npm workspace name
+        required: false
+        default: ''
+        type: string
+    secrets:
+      sprint-api-url:
+        required: true
+      publisher-signing-key:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: sprint
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout package
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v4.7.0
+        with:
+          versionSpec: '6.x'
+
+      - name: Determine release version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v4.7.0
+
+      - name: Check release inputs
+        env:
+          VERSION: ${{ steps.gitversion.outputs.semVer }}
+          VISIBILITY: ${{ inputs.visibility }}
+          OVERLAY: ${{ inputs.overlay }}
+          MANIFEST: ${{ inputs.manifest }}
+          SPRINT_API_URL: ${{ secrets.sprint-api-url }}
+        working-directory: ${{ inputs.package-root }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]] || {
+            echo "::error::Sprint publication requires a GitVersion feature prerelease."
+            exit 1
+          }
+          [[ "$VISIBILITY" == "Private" || "$VISIBILITY" == "Public" ]] || {
+            echo "::error::Invalid package visibility."
+            exit 1
+          }
+          test -n "$SPRINT_API_URL"
+          test -f "$MANIFEST"
+          if [[ -n "$OVERLAY" ]]; then
+            [[ "$OVERLAY" == "environments/production.yaml" ]] || {
+              echo "::error::Sprint packages must use the production overlay."
+              exit 1
+            }
+            test -f "$OVERLAY"
+          elif [[ -f environments/production.yaml ]]; then
+            echo "::error::A production overlay exists but was not selected."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Install Verentis CLI
+        run: npm install --global @verentis/cli@latest
+
+      - name: Preflight publisher federation
+        env:
+          VERENTIS_API_URL: ${{ secrets.sprint-api-url }}
+          VERENTIS_GITHUB_OIDC_AUDIENCE: ${{ secrets.sprint-api-url }}
+          VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
+        run: verentis api GET /v1/publishers/me --scope marketplace.publisher.read
+
+      - name: Build package assets
+        env:
+          BUILD_TARGET: ${{ inputs.build-target }}
+        if: inputs.build-target != ''
+        run: |
+          set -euo pipefail
+          npm ci
+          if [[ "$BUILD_TARGET" == "root" ]]; then
+            npm run build
+          else
+            [[ "$BUILD_TARGET" =~ ^[@a-zA-Z0-9][@a-zA-Z0-9/_-]*$ ]] || {
+              echo "::error::Invalid npm workspace name."
+              exit 1
+            }
+            npm run build --workspace "$BUILD_TARGET"
+          fi
+
+      - name: Validate, pack, and verify signed production package
+        working-directory: ${{ inputs.package-root }}
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          OVERLAY: ${{ inputs.overlay }}
+          VERSION: ${{ steps.gitversion.outputs.semVer }}
+          PUBLISHER_SIGNING_KEY: ${{ secrets.publisher-signing-key }}
+          VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
+        run: |
+          set -euo pipefail
+          test -n "$PUBLISHER_SIGNING_KEY"
+          mkdir -p "$VERENTIS_CONFIG_DIR/keys" "$RUNNER_TEMP/sprint-vpkg"
+          chmod 700 "$VERENTIS_CONFIG_DIR" "$VERENTIS_CONFIG_DIR/keys"
+          printf '%s' "$PUBLISHER_SIGNING_KEY" > "$VERENTIS_CONFIG_DIR/keys/sprint.json"
+          chmod 600 "$VERENTIS_CONFIG_DIR/keys/sprint.json"
+          validate_args=(validate "$MANIFEST")
+          pack_args=(pack . --manifest "$MANIFEST" --set-version "$VERSION" --key sprint --out "$RUNNER_TEMP/sprint-vpkg")
+          if [[ -n "$OVERLAY" ]]; then
+            validate_args+=(--env production)
+            pack_args+=(--env production)
+          fi
+          verentis "${validate_args[@]}"
+          verentis "${pack_args[@]}"
+          mapfile -t packages < <(find "$RUNNER_TEMP/sprint-vpkg" -maxdepth 1 -name '*.vpkg' -type f)
+          [[ "${#packages[@]}" -eq 1 ]] || {
+            echo "::error::Expected exactly one packed package."
+            exit 1
+          }
+          verentis verify "${packages[0]}" --key sprint
+          python3 - "${packages[0]}" "$VERSION" <<'PY'
+          import json
+          import re
+          import sys
+          import tarfile
+
+          path, version = sys.argv[1:]
+          with tarfile.open(path, "r:gz") as archive:
+              def content(name):
+                  member = archive.extractfile(name)
+                  if member is None:
+                      raise ValueError(f"Missing package entry: {name}")
+                  return member.read().decode("utf-8")
+
+              manifest = content("manifest.yaml")
+              metadata = content(".verentis/package.yaml")
+              signature = json.loads(content(".verentis/signatures/developer.dsse.json"))
+          if not signature.get("signatures"):
+              raise ValueError("Package is not signed")
+          if not re.search(rf"(?m)^  version: {re.escape(version)}$", manifest):
+              raise ValueError("Packed manifest version differs from GitVersion")
+          if not re.search(rf"(?m)^version: {re.escape(version)}$", metadata):
+              raise ValueError("Packed package version differs from GitVersion")
+          if not re.search(r"(?m)^publisher: verentis$", metadata):
+              raise ValueError("Packed package publisher is not verentis")
+          PY
+          printf '%s\n' "${packages[0]}" > "$RUNNER_TEMP/sprint-vpkg-path"
+
+      - name: Publish to Sprint
+        env:
+          VERENTIS_API_URL: ${{ secrets.sprint-api-url }}
+          VERENTIS_GITHUB_OIDC_AUDIENCE: ${{ secrets.sprint-api-url }}
+          VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          set -euo pipefail
+          test -n "$VERENTIS_API_URL"
+          vpkg="$(cat "$RUNNER_TEMP/sprint-vpkg-path")"
+          verentis publish "$vpkg" --visibility "$VISIBILITY"
