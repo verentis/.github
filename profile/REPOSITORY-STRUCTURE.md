@@ -79,8 +79,9 @@ marketplace package identity stable unless a separate package migration is appro
 - Name collection repositories for their portfolio purpose.
 - Name runtime repositories `<runtime>-runtime`.
 - Do not encode package type in every repository name.
-- Continue using `.app.yaml` and `.engine.yaml` manifest suffixes because artifact type is operationally
-  meaningful at the package level.
+- Name manifests `<name>.<type>.yaml` (`.app.yaml`, `.engine.yaml`, `.theme.yaml`, `.agent.yaml`, `.skill.yaml`,
+  `.tool.yaml`, `.bundle.yaml`) because artifact type is operationally meaningful at the package level. The
+  suffixes follow the platform package-type registry.
 
 ## Migration rules
 
