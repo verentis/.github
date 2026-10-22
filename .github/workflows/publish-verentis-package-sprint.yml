@@ -15,7 +15,7 @@ on:
         type: string
       visibility:
         required: false
-        default: Private
+        default: Public
         type: string
       build-target:
         description: Empty for no build, root for npm run build, or an npm workspace name
