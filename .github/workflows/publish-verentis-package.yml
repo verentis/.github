@@ -24,7 +24,7 @@ on:
       visibility:
         description: Marketplace visibility for a newly created package
         required: false
-        default: Private
+        default: Public
         type: string
       api-url:
         description: Verentis API URL
