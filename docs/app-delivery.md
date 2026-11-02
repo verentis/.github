@@ -188,8 +188,10 @@ Created and filled by the platform's repository bootstrap; listed here so a miss
 | `production-<region>` | `main` | `AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AKS_RESOURCE_GROUP AKS_CLUSTER_NAME APPS_NAMESPACE APPS_DOMAIN APPS_TLS_SECRET INGRESS_IP PLATFORM_ORIGIN` | app-specific secrets listed under a hosted app's `secrets` (for example `CODE_PROOF_KEY`, one per environment) |
 | `production` | `main` | `VERENTIS_REGISTRY_URL APPS_DOMAIN` | `PUBLISHER_SIGNING_KEY` |
 
-Each environment federates to its own Azure identity with the least it needs: AcrPush for `feature` builds, a
-namespaced deployer role on the apps namespace of its cluster, nothing else. The publisher's GitHub pipeline trust
+Each environment federates to its own Azure identity with the least it needs: AcrPush for `feature` builds,
+"Azure Kubernetes Service Cluster User Role" on its cluster (to fetch the kubeconfig) and a RoleBinding to the
+`verentis-app-deployer` Role in the apps namespace, nothing else. Clusters are Entra-integrated with local accounts
+disabled, so the workflows convert the kubeconfig with kubelogin (`azure/use-kubelogin`, pinned). The publisher's GitHub pipeline trust
 is bound to this repository and the `feature` / `production` environment.
 
 ## Prerequisites

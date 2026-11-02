@@ -2,7 +2,8 @@ name: Deploy a Verentis hosted app
 description: >-
   Renders one hosted app for the target selected by the calling job's GitHub environment, applies it to the
   already-provisioned apps namespace, waits for the rollout, and checks health against the target's own ingress
-  (never through the edge), optionally for an observation window. The caller logs in to Azure first.
+  (never through the edge), optionally for an observation window. The caller logs in to Azure and installs
+  kubectl and kubelogin first (clusters are Entra-integrated with local accounts disabled).
 
 inputs:
   app:
@@ -99,6 +100,8 @@ runs:
         echo "Deploying $APP_NAME to $AKS_CLUSTER_NAME/$NAMESPACE as https://$HOST"
 
         az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing --only-show-errors
+
+        kubelogin convert-kubeconfig -l azurecli
 
         # Dependencies are installed before any app secret is exported.
         if [[ "$(jq -r '.node // false' <<< "$APP")" == true ]]; then npm ci --no-audit --no-fund; fi

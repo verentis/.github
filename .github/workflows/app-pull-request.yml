@@ -115,6 +115,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: azure/setup-kubectl@v5
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.2.22'
       - name: Remove this pull request's preview copies
         env:
           AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
@@ -125,6 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing --only-show-errors
+          kubelogin convert-kubeconfig -l azurecli
           selector="verentis.io/repository=${REPOSITORY//\//.},verentis.io/pr=${PR_NUMBER},app.kubernetes.io/managed-by=verentis-delivery"
           kubectl delete -n "$NAMESPACE" --ignore-not-found --wait=false -l "$selector" \
             ingress,service,deployment,statefulset,configmap,secret,poddisruptionbudget,horizontalpodautoscaler,networkpolicy,serviceaccount

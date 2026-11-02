@@ -138,6 +138,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: azure/setup-kubectl@v5
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.2.22'
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -181,6 +184,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: azure/setup-kubectl@v5
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.2.22'
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -213,6 +219,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: azure/setup-kubectl@v5
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.2.22'
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -245,6 +254,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: azure/setup-kubectl@v5
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.2.22'
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -277,6 +289,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: azure/setup-kubectl@v5
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.2.22'
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
