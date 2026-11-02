@@ -1,0 +1,143 @@
+name: Plan Verentis delivery
+description: >-
+  Selects the packages and hosted apps a change affects. Packages are found by manifest suffix; hosted apps come from
+  .github/verentis-delivery.json. A package is published when it changed or when its hosted app changed, so a pull
+  request preview always has a package that points at its own host.
+
+inputs:
+  base-sha:
+    description: Compare HEAD with this commit; empty selects everything
+    required: false
+    default: ''
+  hosted-follows-package:
+    description: Also ship a hosted app when only its package changed (pull requests, so the preview host exists)
+    required: false
+    default: 'false'
+  shared-paths:
+    description: Newline-separated path prefixes that affect every package and hosted app
+    required: false
+    default: |-
+      .github/
+      package.json
+      package-lock.json
+
+outputs:
+  packages:
+    description: JSON matrix {include:[{package-root, manifest}]}
+    value: ${{ steps.plan.outputs.packages }}
+  hosted:
+    description: JSON matrix {include:[{app}]} where app is the hosted-app config as a JSON string
+    value: ${{ steps.plan.outputs.hosted }}
+  has-packages:
+    description: true when at least one package is selected
+    value: ${{ steps.plan.outputs.has-packages }}
+  has-hosted:
+    description: true when at least one hosted app is selected
+    value: ${{ steps.plan.outputs.has-hosted }}
+
+runs:
+  using: composite
+  steps:
+    - id: plan
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        HOSTED_FOLLOWS_PACKAGE: ${{ inputs.hosted-follows-package }}
+        SHARED_PATHS: ${{ inputs.shared-paths }}
+      run: |
+        set -euo pipefail
+        config=.github/verentis-delivery.json
+        hosted_all='[]'
+        unpublished='[]'
+        if [[ -f "$config" ]]; then
+          hosted_all=$(jq -ce '.hosted // []' "$config")
+          # Fail closed on a config the deploy action cannot use.
+          jq -e 'all(.[]; (.name | test("^[a-z][a-z0-9-]{0,40}$")) and (."package-root" | type == "string")
+                 and (.image | test("^[a-z0-9][a-z0-9/_-]*$")) and ((.manifests // "") != "" or (.render // "") != ""))' \
+            <<< "$hosted_all" > /dev/null || { echo "::error::Invalid $config"; exit 1; }
+          [[ "$(jq '[.[].name] | length' <<< "$hosted_all")" == "$(jq '[.[].name] | unique | length' <<< "$hosted_all")" ]] \
+            || { echo "::error::Duplicate hosted app names in $config"; exit 1; }
+          unpublished=$(jq -c '[(.packages // {}) | to_entries[] | select(.value.publish == false) | .key | rtrimstr("/")]' "$config")
+        fi
+
+        changed=()
+        everything=true
+        if [[ -n "$BASE_SHA" ]]; then
+          everything=false
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD)
+          while IFS= read -r shared; do
+            [[ -z "$shared" ]] && continue
+            for path in "${changed[@]}"; do
+              if [[ "$path" == "$shared" || "$path" == "$shared"* ]]; then everything=true; break 2; fi
+            done
+          done <<< "$SHARED_PATHS"
+        fi
+
+        # touches PREFIX... : true when any changed file is PREFIX or under it ("." matches any change).
+        touches() {
+          if [[ "$everything" == true ]]; then return 0; fi
+          local prefix path
+          for prefix in "$@"; do
+            for path in "${changed[@]}"; do
+              if [[ "$prefix" == "." || "$path" == "$prefix" || "$path" == "${prefix%/}/"* ]]; then return 0; fi
+            done
+          done
+          return 1
+        }
+
+        hosted='[]'
+        hosted_roots=()
+        while IFS= read -r app; do
+          [[ -z "$app" ]] && continue
+          mapfile -t paths < <(jq -r '(.paths // [."package-root"]) | .[]' <<< "$app")
+          if touches "${paths[@]}"; then
+            hosted=$(jq -c --arg app "$app" '. + [{app: $app}]' <<< "$hosted")
+            hosted_roots+=("$(jq -r '."package-root"' <<< "$app")")
+          fi
+        done < <(jq -c '.[]' <<< "$hosted_all")
+
+        mapfile -t manifests < <(
+          # Manifest suffixes are the package-type registry's media slugs and aliases
+          # (platform: src/1 - Shared/Verentis.Packaging.Types/package-types.json).
+          find . -type f \( -name '*.app.yaml' -o -name '*.application.yaml' -o -name '*.engine.yaml' \
+            -o -name '*.agent.yaml' -o -name '*.skill.yaml' -o -name '*.tool.yaml' -o -name '*.bundle.yaml' \
+            -o -name '*.theme.yaml' \) -not -path './.git/*' -not -path '*/node_modules/*' | sort
+        )
+        packages='[]'
+        for manifest in "${manifests[@]}"; do
+          manifest="${manifest#./}"
+          root=$(dirname "$manifest")
+          selected=false
+          if jq -e --arg root "$root" 'index($root) != null' <<< "$unpublished" > /dev/null; then
+            echo "Not published (packages.\"$root\".publish is false): $manifest"
+            continue
+          fi
+          if touches "$root" "$manifest"; then selected=true; fi
+          for hosted_root in "${hosted_roots[@]}"; do
+            if [[ "${hosted_root%/}" == "$root" ]]; then selected=true; fi
+          done
+          if [[ "$selected" == true ]]; then
+            packages=$(jq -c --arg root "$root" --arg manifest "$(basename "$manifest")" \
+              '. + [{"package-root": $root, manifest: $manifest}]' <<< "$packages")
+          fi
+        done
+
+        if [[ "$HOSTED_FOLLOWS_PACKAGE" == true ]]; then
+          while IFS= read -r app; do
+            [[ -z "$app" ]] && continue
+            root=$(jq -r '."package-root" | rtrimstr("/")' <<< "$app")
+            if jq -e --arg root "$root" 'any(.[]; ."package-root" == $root)' <<< "$packages" > /dev/null \
+              && ! jq -e --arg app "$app" 'any(.[]; .app == $app)' <<< "$hosted" > /dev/null; then
+              hosted=$(jq -c --arg app "$app" '. + [{app: $app}]' <<< "$hosted")
+            fi
+          done < <(jq -c '.[]' <<< "$hosted_all")
+        fi
+
+        {
+          echo "packages=$(jq -c '{include: .}' <<< "$packages")"
+          echo "hosted=$(jq -c '{include: .}' <<< "$hosted")"
+          echo "has-packages=$(jq 'length > 0' <<< "$packages")"
+          echo "has-hosted=$(jq 'length > 0' <<< "$hosted")"
+        } >> "$GITHUB_OUTPUT"
+        echo "Packages: $packages"
+        echo "Hosted apps: $(jq -c '[.[].app | fromjson | .name]' <<< "$hosted")"

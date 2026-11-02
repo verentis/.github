@@ -1,0 +1,131 @@
+name: Verentis app pull request
+
+# Trunk-based preview for app repositories. Call it from the repository's pull_request workflow:
+#   - opened / synchronize / reopened / ready_for_review: every changed hosted app is built and deployed to the feature
+#     environment as <name>-pr-<n>.<apps domain>, and every changed package (and the package of every changed hosted
+#     app) is published to the feature registry as <major>.<minor>.<next>-pr.<n>.<run>, pointing at that preview host.
+#   - closed (merged or not): the preview copies are removed. The release workflow on main takes over after a merge.
+# Fork and draft pull requests get no preview (no secrets / not ready).
+
+on:
+  workflow_call:
+    inputs:
+      build-target:
+        description: Package asset build (empty, root, or an npm workspace) before packing
+        required: false
+        default: ''
+        type: string
+      visibility:
+        required: false
+        default: Public
+        type: string
+      shared-paths:
+        description: Newline-separated path prefixes that affect every package and hosted app
+        required: false
+        default: |-
+          .github/
+          package.json
+          package-lock.json
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    if: >-
+      github.event_name == 'pull_request' && github.event.action != 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.plan.outputs.packages }}
+      hosted: ${{ steps.plan.outputs.hosted }}
+      has-packages: ${{ steps.plan.outputs.has-packages }}
+      has-hosted: ${{ steps.plan.outputs.has-hosted }}
+      sequence: ${{ steps.version.outputs.sequence }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: plan
+        uses: verentis/.github/.github/actions/plan-delivery@main
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          hosted-follows-package: 'true'
+          shared-paths: ${{ inputs.shared-paths }}
+      - id: version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # The next main commit's sequence, so the preview sorts below the release that merges it.
+          echo "sequence=$(( $(git rev-list --first-parent --count "$BASE_SHA") + 1 ))" >> "$GITHUB_OUTPUT"
+          echo "prerelease=pr.${PR_NUMBER}.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+  hosted:
+    needs: plan
+    if: needs.plan.outputs.has-hosted == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.hosted) }}
+    uses: verentis/.github/.github/workflows/hosted-app-ship.yml@main
+    with:
+      app: ${{ matrix.app }}
+      mode: pr
+      pr-number: ${{ github.event.pull_request.number }}
+    secrets: inherit
+
+  publish:
+    needs: [plan, hosted]
+    if: >-
+      always() && needs.plan.result == 'success' && needs.plan.outputs.has-packages == 'true'
+      && (needs.hosted.result == 'success' || needs.hosted.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.packages) }}
+    uses: verentis/.github/.github/workflows/publish-verentis-package-target.yml@main
+    with:
+      target: feature
+      package-root: ${{ matrix.package-root }}
+      manifest: ${{ matrix.manifest }}
+      sequence: ${{ needs.plan.outputs.sequence }}
+      prerelease: ${{ needs.plan.outputs.prerelease }}
+      host-suffix: -pr-${{ github.event.pull_request.number }}
+      visibility: ${{ inputs.visibility }}
+      build-target: ${{ inputs.build-target }}
+    # Environment secrets (signing key, Access token) must be passed through every reusable-workflow hop.
+    secrets: inherit
+
+  remove-preview:
+    if: >-
+      github.event_name == 'pull_request' && github.event.action == 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: feature
+    steps:
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v5
+      - name: Remove this pull request's preview copies
+        env:
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+          NAMESPACE: ${{ vars.APPS_NAMESPACE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing --only-show-errors
+          selector="verentis.io/repository=${REPOSITORY//\//.},verentis.io/pr=${PR_NUMBER},app.kubernetes.io/managed-by=verentis-delivery"
+          kubectl delete -n "$NAMESPACE" --ignore-not-found --wait=false -l "$selector" \
+            ingress,service,deployment,statefulset,configmap,secret,poddisruptionbudget,horizontalpodautoscaler,networkpolicy,serviceaccount
+          echo "Removed preview copies matching $selector" >> "$GITHUB_STEP_SUMMARY"

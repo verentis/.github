@@ -1,4 +1,5 @@
 name: Publish Verentis package
+# DEPRECATED: superseded by app-pull-request.yml / app-release.yml (docs/app-delivery.md). Kept until every repository has migrated.
 
 on:
   workflow_call:

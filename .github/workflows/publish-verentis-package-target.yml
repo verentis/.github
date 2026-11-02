@@ -1,0 +1,270 @@
+name: Publish Verentis package to a target
+
+# Packs, signs and publishes one package to the registry of a target. The GitHub environment named like the target
+# (feature or production) holds VERENTIS_REGISTRY_URL, the signing key and, for feature, the Cloudflare Access
+# service token. Publishing authenticates with the job's GitHub OIDC token against the publisher's pipeline trust,
+# which is bound to this repository and that environment.
+#
+# Version: <major>.<minor> from the manifest, patch = the main-branch commit sequence, plus an optional prerelease.
+# Overlay: environments/<target>.yaml when present. ${param:app-host}, ${param:apps-domain} and
+# ${param:host-suffix} resolve to the package's hosted app on that target.
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: feature or production
+        required: true
+        type: string
+      package-root:
+        required: true
+        type: string
+      manifest:
+        required: true
+        type: string
+      sequence:
+        description: Patch number (main-branch commit count)
+        required: true
+        type: string
+      prerelease:
+        description: Optional prerelease label, for example pr.12.345
+        required: false
+        default: ''
+        type: string
+      host-suffix:
+        description: Hosted-app host suffix for this publication (for example -pr-12)
+        required: false
+        default: ''
+        type: string
+      visibility:
+        required: false
+        default: Public
+        type: string
+      build-target:
+        description: >-
+          Empty for no build, root for npm run build, or an npm workspace name. A per-package
+          "packages": {"<package-root>": {"build-target": ...}} entry in .github/verentis-delivery.json wins
+        required: false
+        default: ''
+        type: string
+      prebuilt-assets:
+        description: Use the package-assets artifact from build-verentis-package-assets.yml in this run instead of building
+        required: false
+        default: false
+        type: boolean
+      cli-version:
+        description: Verentis CLI version to install (resolve once per run so every target packs with the same CLI)
+        required: false
+        default: latest
+        type: string
+      image:
+        description: Optional image (repository@sha256:...) the package references, for example an engine image
+        required: false
+        default: ''
+        type: string
+      prepare:
+        description: Optional command run at the repository root before packing, with VERSION, IMAGE and IMAGE_DIGEST
+        required: false
+        default: ''
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: false
+      # Environment secrets of the target environment; declared so callers may also pass them explicitly.
+      PUBLISHER_SIGNING_KEY:
+        required: false
+      ACCESS_CF_CLIENT_ID:
+        required: false
+      ACCESS_CF_CLIENT_SECRET:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: ${{ inputs.target }} ${{ inputs.package-root }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}
+    steps:
+      - name: Check inputs
+        env:
+          TARGET: ${{ inputs.target }}
+          SEQUENCE: ${{ inputs.sequence }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          VISIBILITY: ${{ inputs.visibility }}
+          REGISTRY_URL: ${{ vars.VERENTIS_REGISTRY_URL }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET" == feature || "$TARGET" == production ]] || { echo "::error::Unknown target $TARGET"; exit 1; }
+          [[ "$SEQUENCE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid sequence"; exit 1; }
+          [[ -z "$PRERELEASE" || "$PRERELEASE" =~ ^[0-9A-Za-z.-]+$ ]] || { echo "::error::Invalid prerelease"; exit 1; }
+          [[ "$TARGET" != production || ( -z "$PRERELEASE" && "$REF" == refs/heads/main ) ]] \
+            || { echo "::error::Production publishes only stable versions from main"; exit 1; }
+          [[ "$VISIBILITY" == Private || "$VISIBILITY" == Public ]] || { echo "::error::Invalid visibility"; exit 1; }
+          [[ "$REGISTRY_URL" =~ ^https://[a-z0-9.-]+$ ]] || { echo "::error::VERENTIS_REGISTRY_URL must be an https origin"; exit 1; }
+
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Install Verentis CLI
+        env:
+          CLI_VERSION: ${{ inputs.cli-version }}
+        run: |
+          set -euo pipefail
+          [[ "$CLI_VERSION" == latest || "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::Invalid cli-version"; exit 1; }
+          npm install --global "@verentis/cli@$CLI_VERSION"
+          verentis pack --help | grep -q -- '--param' || { echo "::error::The Verentis CLI is too old (needs pack --param)"; exit 1; }
+
+      - name: Resolve build target
+        id: build
+        env:
+          DEFAULT_TARGET: ${{ inputs.build-target }}
+          DEFAULT_VISIBILITY: ${{ inputs.visibility }}
+          PACKAGE_ROOT: ${{ inputs.package-root }}
+        run: |
+          set -euo pipefail
+          target="$DEFAULT_TARGET"
+          visibility="$DEFAULT_VISIBILITY"
+          config=.github/verentis-delivery.json
+          if [[ -f "$config" ]]; then
+            target=$(jq -r --arg root "$PACKAGE_ROOT" --arg default "$DEFAULT_TARGET" \
+              '($root | rtrimstr("/")) as $key | ((.packages // {})[$key] // {})
+               | if has("build-target") then .["build-target"] else $default end' "$config")
+            visibility=$(jq -r --arg root "$PACKAGE_ROOT" --arg default "$DEFAULT_VISIBILITY" \
+              '($root | rtrimstr("/")) as $key | (.packages // {})[$key].visibility // $default' "$config")
+          fi
+          [[ "$visibility" == Private || "$visibility" == Public ]] || { echo "::error::Invalid visibility $visibility"; exit 1; }
+          artifact=$(jq -rn --arg root "$PACKAGE_ROOT" '"package-assets-" + ($root | rtrimstr("/") | if . == "." or . == "" then "root" else gsub("/"; "__") end)')
+          {
+            echo "target=$target"
+            echo "visibility=$visibility"
+            echo "artifact=$artifact"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore the assets built once for this release
+        if: inputs.prebuilt-assets
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.artifact }}
+          path: ${{ inputs.package-root }}
+
+      - name: Build package assets
+        if: ${{ !inputs.prebuilt-assets && steps.build.outputs.target != '' }}
+        env:
+          BUILD_TARGET: ${{ steps.build.outputs.target }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm ci
+          unset NODE_AUTH_TOKEN
+          if [[ "$BUILD_TARGET" == root ]]; then
+            npm run build
+          else
+            [[ "$BUILD_TARGET" =~ ^[@a-zA-Z0-9][@a-zA-Z0-9/_-]*$ ]] || { echo "::error::Invalid npm workspace name"; exit 1; }
+            npm run build --workspace "$BUILD_TARGET"
+          fi
+
+      - name: Resolve version
+        id: version
+        working-directory: ${{ inputs.package-root }}
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          SEQUENCE: ${{ inputs.sequence }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          base=$(yq -r '.metadata.version' "$MANIFEST")
+          [[ "$base" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+ ]] || { echo "::error::metadata.version must be semver"; exit 1; }
+          echo "version=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${SEQUENCE}${PRERELEASE:+-$PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare
+        if: inputs.prepare != ''
+        env:
+          PREPARE: ${{ inputs.prepare }}
+          VERSION: ${{ steps.version.outputs.version }}
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$IMAGE" ]]; then
+            [[ "$IMAGE" =~ @(sha256:[a-f0-9]{64})$ ]] || { echo "::error::image must be pinned by digest"; exit 1; }
+            export IMAGE_DIGEST="${BASH_REMATCH[1]}"
+          fi
+          bash -euo pipefail -c "$PREPARE"
+
+      - name: Validate, pack and verify
+        id: pack
+        working-directory: ${{ inputs.package-root }}
+        env:
+          TARGET: ${{ inputs.target }}
+          PACKAGE_ROOT: ${{ inputs.package-root }}
+          MANIFEST: ${{ inputs.manifest }}
+          VERSION: ${{ steps.version.outputs.version }}
+          HOST_SUFFIX: ${{ inputs.host-suffix }}
+          APPS_DOMAIN: ${{ vars.APPS_DOMAIN }}
+          PUBLISHER_SIGNING_KEY: ${{ secrets.PUBLISHER_SIGNING_KEY }}
+          VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
+        run: |
+          set -euo pipefail
+          test -f "$MANIFEST"
+          test -n "$PUBLISHER_SIGNING_KEY" || { echo "::error::Missing PUBLISHER_SIGNING_KEY on the $TARGET environment"; exit 1; }
+          version="$VERSION"
+
+          overlay_args=()
+          other_overlays=()
+          for file in environments/*.yaml; do
+            [[ -f "$file" && "$file" != environments/local.yaml ]] && other_overlays+=("$file")
+          done
+          if [[ -f "environments/$TARGET.yaml" ]]; then
+            overlay_args=(--env "$TARGET")
+          elif (( ${#other_overlays[@]} > 0 )); then
+            echo "::error::$PACKAGE_ROOT has environment overlays but no environments/$TARGET.yaml"; exit 1
+          fi
+          # apps-domain is available to every package (for example to point at another repository's app);
+          # app-host and host-suffix only to a package with its own hosted app.
+          if [[ -n "$APPS_DOMAIN" ]]; then overlay_args+=(--param "apps-domain=${APPS_DOMAIN}"); fi
+          config="$GITHUB_WORKSPACE/.github/verentis-delivery.json"
+          if [[ -f "$config" ]]; then
+            app=$(jq -r --arg root "$PACKAGE_ROOT" 'first(.hosted[]? | select((."package-root" | rtrimstr("/")) == $root) | .name) // ""' "$config")
+            if [[ -n "$app" ]]; then
+              test -n "$APPS_DOMAIN" || { echo "::error::Missing APPS_DOMAIN on the $TARGET environment"; exit 1; }
+              overlay_args+=(--param "app-host=${app}${HOST_SUFFIX}.${APPS_DOMAIN}" --param "host-suffix=${HOST_SUFFIX}")
+            fi
+          fi
+
+          mkdir -p "$VERENTIS_CONFIG_DIR/keys" "$RUNNER_TEMP/vpkg"
+          chmod 700 "$VERENTIS_CONFIG_DIR" "$VERENTIS_CONFIG_DIR/keys"
+          printf '%s' "$PUBLISHER_SIGNING_KEY" > "$VERENTIS_CONFIG_DIR/keys/ci.json"
+          chmod 600 "$VERENTIS_CONFIG_DIR/keys/ci.json"
+
+          verentis validate "$MANIFEST" "${overlay_args[@]}"
+          verentis pack . --manifest "$MANIFEST" --set-version "$version" --key ci --out "$RUNNER_TEMP/vpkg" "${overlay_args[@]}"
+          mapfile -t packages < <(find "$RUNNER_TEMP/vpkg" -maxdepth 1 -name '*.vpkg' -type f)
+          [[ "${#packages[@]}" -eq 1 ]] || { echo "::error::Expected exactly one packed package"; exit 1; }
+          verentis verify "${packages[0]}" --key ci
+          mkdir -p "$RUNNER_TEMP/inspect"
+          tar -xzf "${packages[0]}" -C "$RUNNER_TEMP/inspect" manifest.yaml .verentis/package.yaml .verentis/signatures/developer.dsse.json
+          [[ "$(yq -r '.metadata.version' "$RUNNER_TEMP/inspect/manifest.yaml")" == "$version" ]] || { echo "::error::Packed manifest version differs"; exit 1; }
+          [[ "$(yq -r '.version' "$RUNNER_TEMP/inspect/.verentis/package.yaml")" == "$version" ]] || { echo "::error::Packed package version differs"; exit 1; }
+          [[ "$(jq '.signatures | length' "$RUNNER_TEMP/inspect/.verentis/signatures/developer.dsse.json")" -gt 0 ]] || { echo "::error::Package is not signed"; exit 1; }
+          echo "vpkg=${packages[0]}" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        env:
+          VPKG: ${{ steps.pack.outputs.vpkg }}
+          VISIBILITY: ${{ steps.build.outputs.visibility }}
+          VERENTIS_API_URL: ${{ vars.VERENTIS_REGISTRY_URL }}
+          VERENTIS_GITHUB_OIDC_AUDIENCE: ${{ vars.VERENTIS_REGISTRY_URL }}
+          VERENTIS_CF_ACCESS_CLIENT_ID: ${{ secrets.ACCESS_CF_CLIENT_ID }}
+          VERENTIS_CF_ACCESS_CLIENT_SECRET: ${{ secrets.ACCESS_CF_CLIENT_SECRET }}
+          VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
+        run: |
+          set -euo pipefail
+          verentis publish "$VPKG" --visibility "$VISIBILITY"
+          echo "Published $(basename "$VPKG") (${{ steps.pack.outputs.version }}) to ${{ inputs.target }}" >> "$GITHUB_STEP_SUMMARY"

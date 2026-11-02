@@ -1,0 +1,192 @@
+name: Deploy a Verentis hosted app
+description: >-
+  Renders one hosted app for the target selected by the calling job's GitHub environment, applies it to the
+  already-provisioned apps namespace, waits for the rollout, and checks health against the target's own ingress
+  (never through the edge), optionally for an observation window. The caller logs in to Azure first.
+
+inputs:
+  app:
+    description: The hosted-app config from .github/verentis-delivery.json (JSON)
+    required: true
+  image:
+    description: Immutable image reference (repository@sha256:...)
+    required: true
+  host-suffix:
+    description: Appended to every app host and workload name (for example -pr-12); empty for the stable copy
+    required: false
+    default: ''
+  pr-number:
+    description: Pull request number for preview copies; labels the objects for removal
+    required: false
+    default: ''
+  expires-hours:
+    description: Preview copies get a verentis.io/expires-at annotation this many hours ahead (reaper safety net)
+    required: false
+    default: '72'
+  observe-seconds:
+    description: Keep probing health for this long after the rollout (0 = single check)
+    required: false
+    default: '0'
+  aks-resource-group:
+    required: true
+    description: AKS resource group of the target cluster
+  aks-cluster-name:
+    required: true
+    description: AKS cluster name
+  namespace:
+    required: true
+    description: Apps namespace on the target cluster (provisioned by the platform bootstrap)
+  apps-domain:
+    required: true
+    description: Apps domain of the target, for example apps.verentis.io or apps.feature.verentis.dev
+  tls-secret:
+    required: true
+    description: Wildcard TLS secret for the apps domain in the apps namespace
+  platform-origin:
+    required: false
+    default: ''
+    description: The target's regional API origin, exposed to renderers as PLATFORM_ORIGIN
+  ingress-ip:
+    required: false
+    default: ''
+    description: The target ingress IP; health checks resolve app hosts to it so they never go through the edge
+  access-header-value:
+    required: false
+    default: ''
+    description: Internal environments only; ingresses then require X-Verentis-Test-Access with this value
+  secrets-json:
+    required: false
+    default: '{}'
+    description: toJSON(secrets) of the job; only the names the app lists under "secrets" reach pre-deploy and render
+
+runs:
+  using: composite
+  steps:
+    - name: Render, apply and verify
+      shell: bash
+      env:
+        APP: ${{ inputs.app }}
+        IMAGE: ${{ inputs.image }}
+        HOST_SUFFIX: ${{ inputs.host-suffix }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        EXPIRES_HOURS: ${{ inputs.expires-hours }}
+        OBSERVE_SECONDS: ${{ inputs.observe-seconds }}
+        AKS_RESOURCE_GROUP: ${{ inputs.aks-resource-group }}
+        AKS_CLUSTER_NAME: ${{ inputs.aks-cluster-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        APPS_DOMAIN: ${{ inputs.apps-domain }}
+        TLS_SECRET: ${{ inputs.tls-secret }}
+        PLATFORM_ORIGIN: ${{ inputs.platform-origin }}
+        INGRESS_IP: ${{ inputs.ingress-ip }}
+        ACCESS_HEADER_VALUE: ${{ inputs.access-header-value }}
+        SECRETS_JSON: ${{ inputs.secrets-json }}
+        REPOSITORY: ${{ github.repository }}
+        SOURCE_COMMIT: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        for setting in AKS_RESOURCE_GROUP AKS_CLUSTER_NAME NAMESPACE APPS_DOMAIN TLS_SECRET; do
+          [[ -n "${!setting}" ]] || { echo "::error::Missing $setting for this target (GitHub environment variable)"; exit 1; }
+        done
+        [[ "$IMAGE" =~ ^[a-z0-9.-]+/[a-z0-9/_-]+@sha256:[a-f0-9]{64}$ ]] || { echo "::error::Image must be pinned by digest"; exit 1; }
+        [[ -z "$HOST_SUFFIX" || "$HOST_SUFFIX" =~ ^-pr-[1-9][0-9]{0,5}$ ]] || { echo "::error::Invalid host suffix"; exit 1; }
+        [[ -z "$ACCESS_HEADER_VALUE" || "$ACCESS_HEADER_VALUE" =~ ^[A-Za-z0-9_-]{32,}$ ]] \
+          || { echo "::error::The access header value must be at least 32 characters of [A-Za-z0-9_-]"; exit 1; }
+
+        name=$(jq -r '.name' <<< "$APP")
+        export APP_NAME="${name}${HOST_SUFFIX}"
+        export HOST="${APP_NAME}.${APPS_DOMAIN}"
+        export IMAGE NAMESPACE APPS_DOMAIN TLS_SECRET PLATFORM_ORIGIN HOST_SUFFIX SOURCE_COMMIT
+        echo "Deploying $APP_NAME to $AKS_CLUSTER_NAME/$NAMESPACE as https://$HOST"
+
+        az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing --only-show-errors
+
+        # Dependencies are installed before any app secret is exported.
+        if [[ "$(jq -r '.node // false' <<< "$APP")" == true ]]; then npm ci --no-audit --no-fund; fi
+
+        # Only explicitly listed environment secrets are exported, and only for pre-deploy and render.
+        app_secrets=()
+        while IFS= read -r secret; do
+          [[ -z "$secret" ]] && continue
+          [[ "$secret" =~ ^[A-Z][A-Z0-9_]*$ ]] || { echo "::error::Invalid secret name $secret"; exit 1; }
+          value=$(jq -r --arg name "$secret" '.[$name] // ""' <<< "$SECRETS_JSON")
+          [[ -n "$value" ]] || { echo "::error::Missing environment secret $secret for this target"; exit 1; }
+          export "$secret=$value"
+          app_secrets+=("$secret")
+        done < <(jq -r '(.secrets // [])[]' <<< "$APP")
+        unset SECRETS_JSON
+        pre_deploy=$(jq -r '."pre-deploy" // ""' <<< "$APP")
+        if [[ -n "$pre_deploy" ]]; then bash -euo pipefail -c "$pre_deploy"; fi
+
+        rendered="$RUNNER_TEMP/$APP_NAME.yaml"
+        render=$(jq -r '.render // ""' <<< "$APP")
+        if [[ -n "$render" ]]; then
+          bash -euo pipefail -c "$render" > "$rendered"
+        else
+          sed -e "s|__IMAGE__|${IMAGE}|g" -e "s|__HOST__|${HOST}|g" -e "s|__NAMESPACE__|${NAMESPACE}|g" \
+              -e "s|__APP__|${APP_NAME}|g" -e "s|__TLS_SECRET__|${TLS_SECRET}|g" \
+              -e "s|__APPS_DOMAIN__|${APPS_DOMAIN}|g" -e "s|__HOST_SUFFIX__|${HOST_SUFFIX}|g" \
+              -e "s|__PLATFORM_ORIGIN__|${PLATFORM_ORIGIN}|g" "$(jq -r '.manifests' <<< "$APP")" > "$rendered"
+        fi
+        for secret in "${app_secrets[@]}"; do unset "$secret"; done
+        if grep -nE '__[A-Z][A-Z0-9_]*__' "$rendered"; then echo "::error::Unresolved placeholders in the rendered manifests"; exit 1; fi
+
+        # Ownership labels on every object, so a preview can be removed by label and audited by repository.
+        export REPO_LABEL="${REPOSITORY//\//.}"
+        yq -i '(select(.kind != null) | .metadata.labels["verentis.io/repository"]) = strenv(REPO_LABEL)
+             | (select(.kind != null) | .metadata.labels["verentis.io/app"]) = strenv(APP_NAME)
+             | (select(.kind != null) | .metadata.labels["app.kubernetes.io/managed-by"]) = "verentis-delivery"
+             | (select(.kind != null) | .metadata.annotations["verentis.io/source-commit"]) = strenv(SOURCE_COMMIT)' "$rendered"
+        if [[ -n "$PR_NUMBER" ]]; then
+          export PR_NUMBER
+          EXPIRES_AT=$(date -u -d "+${EXPIRES_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)
+          export EXPIRES_AT
+          yq -i '(select(.kind != null) | .metadata.labels["verentis.io/pr"]) = strenv(PR_NUMBER)
+               | (select(.kind != null) | .metadata.labels["verentis.io/ephemeral"]) = "true"
+               | (select(.kind != null) | .metadata.annotations["verentis.io/expires-at"]) = strenv(EXPIRES_AT)' "$rendered"
+        fi
+        if [[ -n "$ACCESS_HEADER_VALUE" ]]; then
+          export SNIPPET="if (\$http_x_verentis_test_access != \"${ACCESS_HEADER_VALUE}\") { return 403; }"
+          yq -i '(select(.kind == "Ingress") | .metadata.annotations["nginx.ingress.kubernetes.io/server-snippet"]) = strenv(SNIPPET)' "$rendered"
+        fi
+        # Only kinds that preview removal deletes are allowed, so a closed pull request leaves nothing behind.
+        allowed='Deployment|Service|Ingress|ConfigMap|Secret|PodDisruptionBudget|HorizontalPodAutoscaler|NetworkPolicy|ServiceAccount'
+        export ALLOWED_KINDS="^($allowed)$"
+        disallowed=$(yq ea 'select(.kind != null and (.kind | test(strenv(ALLOWED_KINDS)) | not)) | .kind + "/" + .metadata.name' "$rendered")
+        if [[ -n "$disallowed" ]]; then
+          echo "::error::Unsupported kinds for a hosted app (allowed: $allowed): $disallowed"; exit 1
+        fi
+        # Every object must land in the target apps namespace; nothing cluster-scoped is allowed.
+        foreign=$(yq ea 'select(.kind != null and .metadata.namespace != strenv(NAMESPACE)) | .kind + "/" + .metadata.name' "$rendered")
+        if [[ -n "$foreign" ]]; then
+          echo "::error::Every rendered object must set metadata.namespace to $NAMESPACE: $foreign"; exit 1
+        fi
+
+        kubectl apply -n "$NAMESPACE" -f "$rendered"
+
+        mapfile -t deployments < <(jq -r --arg suffix "$HOST_SUFFIX" '(.deployments // [.name]) | .[] | . + $suffix' <<< "$APP")
+        for deployment in "${deployments[@]}"; do
+          kubectl rollout status deployment/"$deployment" -n "$NAMESPACE" --timeout=10m
+        done
+        images=$(kubectl get deployment "${deployments[@]}" -n "$NAMESPACE" -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}')
+        grep -qxF "$IMAGE" <<< "$images" || { echo "::error::No deployment runs $IMAGE"; exit 1; }
+
+        mapfile -t checks < <(jq -r --arg suffix "$HOST_SUFFIX" --arg domain "$APPS_DOMAIN" --arg name "$name" \
+          '(.health // [{path: "/"}]) | .[] | "\((.host // $name) + $suffix + "." + $domain) \(.path)"' <<< "$APP")
+        probe() {
+          local host path args
+          for check in "${checks[@]}"; do
+            read -r host path <<< "$check"
+            args=(--fail --silent --show-error --max-time 15 -o /dev/null)
+            if [[ -n "$INGRESS_IP" ]]; then args+=(--resolve "$host:443:$INGRESS_IP"); fi
+            if [[ -n "$ACCESS_HEADER_VALUE" ]]; then args+=(-H "X-Verentis-Test-Access: $ACCESS_HEADER_VALUE"); fi
+            curl "${args[@]}" "$@" "https://$host$path" || { echo "::error::Health check failed: https://$host$path"; return 1; }
+          done
+        }
+        # First check waits for certificates and endpoints; later checks must pass every time.
+        probe --retry 20 --retry-delay 10 --retry-all-errors
+        if (( OBSERVE_SECONDS > 0 )); then
+          end=$((SECONDS + OBSERVE_SECONDS))
+          while (( SECONDS < end )); do sleep 15; probe; done
+          echo "Observed $APP_NAME healthy for ${OBSERVE_SECONDS}s"
+        fi
+        echo "### $APP_NAME → https://$HOST ($AKS_CLUSTER_NAME)" >> "$GITHUB_STEP_SUMMARY"

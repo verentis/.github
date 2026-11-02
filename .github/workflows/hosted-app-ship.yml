@@ -1,0 +1,295 @@
+name: Ship a Verentis hosted app
+
+# Builds one hosted app's image once and rolls the same digest out:
+#   pr       -> the feature environment as <name>-pr-<n> (a preview copy, removed when the PR closes)
+#   release  -> the feature environment as <name>, then the first production region with an observation window,
+#               then the remaining regions one at a time, each job needing the previous one (explicit order, up to
+#               four regions). A failure stops every later region.
+# Every target is a GitHub environment of the calling repository (feature, production-eus, ...) whose variables
+# point at that cluster; production environments only accept deployments from main.
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Hosted-app config from .github/verentis-delivery.json (JSON)
+        required: true
+        type: string
+      mode:
+        description: pr or release
+        required: true
+        type: string
+      pr-number:
+        required: false
+        default: ''
+        type: string
+      production-targets:
+        description: JSON list of production GitHub environments in rollout order (first region first)
+        required: false
+        default: '["production-eus", "production-nz", "production-za"]'
+        type: string
+      observe-seconds:
+        description: Observation window after the first production region
+        required: false
+        default: '600'
+        type: string
+    outputs:
+      image:
+        description: The deployed image (repository@digest)
+        value: ${{ jobs.build.outputs.image }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build ${{ fromJSON(inputs.app).name }}
+    runs-on: ubuntu-latest
+    environment: feature
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      region-1: ${{ steps.ref.outputs.region-1 }}
+      region-2: ${{ steps.ref.outputs.region-2 }}
+      region-3: ${{ steps.ref.outputs.region-3 }}
+      region-4: ${{ steps.ref.outputs.region-4 }}
+    steps:
+      - name: Check inputs
+        env:
+          MODE: ${{ inputs.mode }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          TARGETS: ${{ inputs.production-targets }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            pr) [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,5}$ ]] || { echo "::error::pr mode needs pr-number"; exit 1; } ;;
+            release) [[ "$REF" == refs/heads/main ]] || { echo "::error::release mode runs only on main"; exit 1; } ;;
+            *) echo "::error::Unknown mode $MODE"; exit 1 ;;
+          esac
+          jq -e 'type == "array" and length > 0 and length <= 4 and all(.[]; test("^production-[a-z0-9]+$"))
+                 and (unique | length) == length' <<< "$TARGETS" > /dev/null \
+            || { echo "::error::production-targets must list 1-4 distinct production-<region> environments"; exit 1; }
+
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Log in to the registry
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+
+      - name: Resolve build settings
+        id: settings
+        env:
+          APP: ${{ inputs.app }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+          test -n "$ACR_LOGIN_SERVER" || { echo "::error::Missing ACR_LOGIN_SERVER on the feature environment"; exit 1; }
+          {
+            echo "repository=$ACR_LOGIN_SERVER/$(jq -r '.image' <<< "$APP")"
+            echo "context=$(jq -r '.context // ."package-root"' <<< "$APP")"
+            echo "dockerfile=$(jq -r '.dockerfile // ((.context // ."package-root") + "/Dockerfile")' <<< "$APP")"
+            echo "name=$(jq -r '.name' <<< "$APP")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.settings.outputs.context }}
+          file: ${{ steps.settings.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.settings.outputs.repository }}:sha-${{ github.sha }}
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ steps.settings.outputs.name }}
+          cache-to: type=gha,scope=${{ steps.settings.outputs.name }},mode=max
+
+      - name: Pin the digest
+        id: ref
+        env:
+          REPOSITORY: ${{ steps.settings.outputs.repository }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          TARGETS: ${{ inputs.production-targets }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::Missing image digest"; exit 1; }
+          echo "image=$REPOSITORY@$DIGEST" >> "$GITHUB_OUTPUT"
+          for index in 1 2 3 4; do
+            echo "region-$index=$(jq -r --argjson i "$((index - 1))" '.[$i] // ""' <<< "$TARGETS")" >> "$GITHUB_OUTPUT"
+          done
+
+  feature:
+    name: feature ${{ fromJSON(inputs.app).name }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment: feature
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: verentis/.github/.github/actions/deploy-hosted-app@main
+        with:
+          app: ${{ inputs.app }}
+          image: ${{ needs.build.outputs.image }}
+          host-suffix: ${{ inputs.mode == 'pr' && format('-pr-{0}', inputs.pr-number) || '' }}
+          pr-number: ${{ inputs.pr-number }}
+          aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          namespace: ${{ vars.APPS_NAMESPACE }}
+          apps-domain: ${{ vars.APPS_DOMAIN }}
+          tls-secret: ${{ vars.APPS_TLS_SECRET }}
+          platform-origin: ${{ vars.PLATFORM_ORIGIN }}
+          ingress-ip: ${{ vars.INGRESS_IP }}
+          access-header-value: ${{ secrets.ACCESS_HEADER_VALUE }}
+          secrets-json: ${{ toJSON(secrets) }}
+      - name: App checks against the feature copy
+        if: fromJSON(inputs.app)['feature-check'] != null
+        env:
+          APP_URL: https://${{ fromJSON(inputs.app).name }}${{ inputs.mode == 'pr' && format('-pr-{0}', inputs.pr-number) || '' }}.${{ vars.APPS_DOMAIN }}
+          PLATFORM_ORIGIN: ${{ vars.PLATFORM_ORIGIN }}
+          ACCESS_CF_CLIENT_ID: ${{ secrets.ACCESS_CF_CLIENT_ID }}
+          ACCESS_CF_CLIENT_SECRET: ${{ secrets.ACCESS_CF_CLIENT_SECRET }}
+          CHECK: ${{ fromJSON(inputs.app)['feature-check'] }}
+        run: bash -euo pipefail -c "$CHECK"
+
+  region-1:
+    name: ${{ needs.build.outputs.region-1 }} ${{ fromJSON(inputs.app).name }} (first production region (+ observation))
+    needs: [build, feature]
+    if: inputs.mode == 'release' && needs.build.outputs.region-1 != ''
+    runs-on: ubuntu-latest
+    environment: ${{ needs.build.outputs.region-1 }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: verentis/.github/.github/actions/deploy-hosted-app@main
+        with:
+          app: ${{ inputs.app }}
+          image: ${{ needs.build.outputs.image }}
+          observe-seconds: ${{ inputs.observe-seconds }}
+          aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          namespace: ${{ vars.APPS_NAMESPACE }}
+          apps-domain: ${{ vars.APPS_DOMAIN }}
+          tls-secret: ${{ vars.APPS_TLS_SECRET }}
+          platform-origin: ${{ vars.PLATFORM_ORIGIN }}
+          ingress-ip: ${{ vars.INGRESS_IP }}
+          secrets-json: ${{ toJSON(secrets) }}
+
+  region-2:
+    name: ${{ needs.build.outputs.region-2 }} ${{ fromJSON(inputs.app).name }} (production region 2)
+    needs: [build, region-1]
+    if: inputs.mode == 'release' && needs.build.outputs.region-2 != ''
+    runs-on: ubuntu-latest
+    environment: ${{ needs.build.outputs.region-2 }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: verentis/.github/.github/actions/deploy-hosted-app@main
+        with:
+          app: ${{ inputs.app }}
+          image: ${{ needs.build.outputs.image }}
+          observe-seconds: '0'
+          aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          namespace: ${{ vars.APPS_NAMESPACE }}
+          apps-domain: ${{ vars.APPS_DOMAIN }}
+          tls-secret: ${{ vars.APPS_TLS_SECRET }}
+          platform-origin: ${{ vars.PLATFORM_ORIGIN }}
+          ingress-ip: ${{ vars.INGRESS_IP }}
+          secrets-json: ${{ toJSON(secrets) }}
+
+  region-3:
+    name: ${{ needs.build.outputs.region-3 }} ${{ fromJSON(inputs.app).name }} (production region 3)
+    needs: [build, region-2]
+    if: inputs.mode == 'release' && needs.build.outputs.region-3 != ''
+    runs-on: ubuntu-latest
+    environment: ${{ needs.build.outputs.region-3 }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: verentis/.github/.github/actions/deploy-hosted-app@main
+        with:
+          app: ${{ inputs.app }}
+          image: ${{ needs.build.outputs.image }}
+          observe-seconds: '0'
+          aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          namespace: ${{ vars.APPS_NAMESPACE }}
+          apps-domain: ${{ vars.APPS_DOMAIN }}
+          tls-secret: ${{ vars.APPS_TLS_SECRET }}
+          platform-origin: ${{ vars.PLATFORM_ORIGIN }}
+          ingress-ip: ${{ vars.INGRESS_IP }}
+          secrets-json: ${{ toJSON(secrets) }}
+
+  region-4:
+    name: ${{ needs.build.outputs.region-4 }} ${{ fromJSON(inputs.app).name }} (production region 4)
+    needs: [build, region-3]
+    if: inputs.mode == 'release' && needs.build.outputs.region-4 != ''
+    runs-on: ubuntu-latest
+    environment: ${{ needs.build.outputs.region-4 }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: verentis/.github/.github/actions/deploy-hosted-app@main
+        with:
+          app: ${{ inputs.app }}
+          image: ${{ needs.build.outputs.image }}
+          observe-seconds: '0'
+          aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          namespace: ${{ vars.APPS_NAMESPACE }}
+          apps-domain: ${{ vars.APPS_DOMAIN }}
+          tls-secret: ${{ vars.APPS_TLS_SECRET }}
+          platform-origin: ${{ vars.PLATFORM_ORIGIN }}
+          ingress-ip: ${{ vars.INGRESS_IP }}
+          secrets-json: ${{ toJSON(secrets) }}

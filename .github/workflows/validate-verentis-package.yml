@@ -43,6 +43,20 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$MANIFEST"
-          args=(validate .)
-          if [[ -n "$OVERLAY" ]]; then args+=(--overlay "$OVERLAY"); fi
-          verentis "${args[@]}"
+          # A manifest whose deployable values (entry, hosts) live only in non-local overlays is never published
+          # bare, so the bare manifest is validated only when there are no such overlays.
+          overlays=()
+          for file in environments/*.yaml; do
+            [[ -f "$file" && "$file" != environments/local.yaml ]] && overlays+=("$file")
+          done
+          if (( ${#overlays[@]} == 0 )); then verentis validate "$MANIFEST"; fi
+          if [[ -n "$OVERLAY" ]]; then verentis validate "$MANIFEST" --overlay "$OVERLAY"; fi
+          # Every environment overlay must validate. Overlay parameters get sample values; real ones come from the
+          # target at publish time (see publish-verentis-package-target.yml).
+          sample=(--param app-host=sample-pr-1.apps.feature.verentis.dev --param apps-domain=apps.feature.verentis.dev --param host-suffix=-pr-1)
+          for file in environments/*.yaml; do
+            [[ -f "$file" ]] || continue
+            env_name=$(basename "$file" .yaml)
+            echo "Validating overlay $env_name"
+            verentis validate "$MANIFEST" --env "$env_name" "${sample[@]}"
+          done

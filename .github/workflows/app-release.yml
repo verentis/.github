@@ -1,0 +1,153 @@
+name: Verentis app release
+
+# Trunk-based release for app repositories. Call it from the repository's push-to-main workflow. For every changed
+# hosted app the image is built once and the same digest goes to the feature environment, then the first production
+# region (with an observation window), then the remaining regions one at a time. After every hosted app is live,
+# each changed package is published as <major>.<minor>.<first-parent commit count of main>: first to the feature
+# registry, then to the global production registry, which distributes it to the regions. Package assets are built
+# once (build-verentis-package-assets.yml) and packed from that artifact for both targets with one pinned CLI
+# version; publishing an identical package again (a re-run) is a no-op. Nothing is rebuilt between stages.
+
+on:
+  workflow_call:
+    inputs:
+      build-target:
+        description: Package asset build (empty, root, or an npm workspace) before packing
+        required: false
+        default: ''
+        type: string
+      visibility:
+        required: false
+        default: Public
+        type: string
+      shared-paths:
+        description: Newline-separated path prefixes that affect every package and hosted app
+        required: false
+        default: |-
+          .github/
+          package.json
+          package-lock.json
+        type: string
+      production-targets:
+        description: JSON list of production GitHub environments in rollout order (first region first)
+        required: false
+        default: '["production-eus", "production-nz", "production-za"]'
+        type: string
+      observe-seconds:
+        required: false
+        default: '600'
+        type: string
+      everything:
+        description: Ship every package and hosted app regardless of what changed (manual runs)
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      NPM_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.plan.outputs.packages }}
+      hosted: ${{ steps.plan.outputs.hosted }}
+      has-packages: ${{ steps.plan.outputs.has-packages }}
+      has-hosted: ${{ steps.plan.outputs.has-hosted }}
+      sequence: ${{ steps.version.outputs.sequence }}
+      cli-version: ${{ steps.version.outputs.cli-version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: base
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVERYTHING: ${{ inputs.everything }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVERYTHING" == true || -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$BEFORE" >> "$GITHUB_OUTPUT"
+          fi
+      - id: plan
+        uses: verentis/.github/.github/actions/plan-delivery@main
+        with:
+          base-sha: ${{ steps.base.outputs.sha }}
+          shared-paths: ${{ inputs.shared-paths }}
+      - id: version
+        run: |
+          set -euo pipefail
+          echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
+          # Every target of this release packs with the same CLI.
+          echo "cli-version=$(npm view @verentis/cli version)" >> "$GITHUB_OUTPUT"
+
+  hosted:
+    needs: plan
+    if: needs.plan.outputs.has-hosted == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.hosted) }}
+    uses: verentis/.github/.github/workflows/hosted-app-ship.yml@main
+    with:
+      app: ${{ matrix.app }}
+      mode: release
+      production-targets: ${{ inputs.production-targets }}
+      observe-seconds: ${{ inputs.observe-seconds }}
+    secrets: inherit
+
+  assets:
+    needs: plan
+    if: needs.plan.outputs.has-packages == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.packages) }}
+    uses: verentis/.github/.github/workflows/build-verentis-package-assets.yml@main
+    with:
+      package-root: ${{ matrix.package-root }}
+      build-target: ${{ inputs.build-target }}
+    secrets: inherit
+
+  publish-feature:
+    needs: [plan, hosted, assets]
+    if: >-
+      always() && needs.plan.result == 'success' && needs.plan.outputs.has-packages == 'true'
+      && needs.assets.result == 'success'
+      && (needs.hosted.result == 'success' || needs.hosted.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.packages) }}
+    uses: verentis/.github/.github/workflows/publish-verentis-package-target.yml@main
+    with:
+      target: feature
+      package-root: ${{ matrix.package-root }}
+      manifest: ${{ matrix.manifest }}
+      sequence: ${{ needs.plan.outputs.sequence }}
+      visibility: ${{ inputs.visibility }}
+      prebuilt-assets: true
+      cli-version: ${{ needs.plan.outputs.cli-version }}
+    # Environment secrets (signing key, Access token) must be passed through every reusable-workflow hop.
+    secrets: inherit
+
+  publish-production:
+    needs: [plan, publish-feature]
+    if: always() && needs.publish-feature.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.packages) }}
+    uses: verentis/.github/.github/workflows/publish-verentis-package-target.yml@main
+    with:
+      target: production
+      package-root: ${{ matrix.package-root }}
+      manifest: ${{ matrix.manifest }}
+      sequence: ${{ needs.plan.outputs.sequence }}
+      visibility: ${{ inputs.visibility }}
+      prebuilt-assets: true
+      cli-version: ${{ needs.plan.outputs.cli-version }}
+    secrets: inherit

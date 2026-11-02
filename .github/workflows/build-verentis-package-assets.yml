@@ -1,0 +1,79 @@
+name: Build Verentis package assets
+
+# Builds one package's assets once (npm ci + the package's build target) and uploads its package root as a run
+# artifact. The feature and production publications then pack that same content, so production never receives a
+# rebuild of what was tested on feature. Everything a package can contain lives under its package root.
+
+on:
+  workflow_call:
+    inputs:
+      package-root:
+        required: true
+        type: string
+      build-target:
+        description: Default build target; a packages.<root>.build-target entry in .github/verentis-delivery.json wins
+        required: false
+        default: ''
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: assets ${{ inputs.package-root }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve build target and artifact name
+        id: build
+        env:
+          DEFAULT_TARGET: ${{ inputs.build-target }}
+          PACKAGE_ROOT: ${{ inputs.package-root }}
+        run: |
+          set -euo pipefail
+          target="$DEFAULT_TARGET"
+          config=.github/verentis-delivery.json
+          if [[ -f "$config" ]]; then
+            target=$(jq -r --arg root "$PACKAGE_ROOT" --arg default "$DEFAULT_TARGET" \
+              '($root | rtrimstr("/")) as $key | ((.packages // {})[$key] // {})
+               | if has("build-target") then .["build-target"] else $default end' "$config")
+          fi
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "artifact=$(jq -rn --arg root "$PACKAGE_ROOT" '"package-assets-" + ($root | rtrimstr("/") | if . == "." or . == "" then "root" else gsub("/"; "__") end)')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v5
+        if: steps.build.outputs.target != ''
+        with:
+          node-version: '24'
+
+      - name: Build
+        if: steps.build.outputs.target != ''
+        env:
+          BUILD_TARGET: ${{ steps.build.outputs.target }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm ci
+          unset NODE_AUTH_TOKEN
+          if [[ "$BUILD_TARGET" == root ]]; then
+            npm run build
+          else
+            [[ "$BUILD_TARGET" =~ ^[@a-zA-Z0-9][@a-zA-Z0-9/_-]*$ ]] || { echo "::error::Invalid npm workspace name"; exit 1; }
+            npm run build --workspace "$BUILD_TARGET"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.artifact }}
+          path: |
+            ${{ inputs.package-root }}
+            !${{ inputs.package-root }}/**/node_modules/**
+            !${{ inputs.package-root }}/.git/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
