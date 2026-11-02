@@ -36,9 +36,18 @@ permissions:
   id-token: write
 
 jobs:
+  delivery-disabled:
+    if: vars.APP_DELIVERY_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: >-
+          echo "::notice::App delivery is disabled for this repository. The platform's bootstrap-app-repos workflow
+          creates its environments and identities and then sets the repository variable APP_DELIVERY_ENABLED=true."
+
   plan:
     if: >-
-      github.event_name == 'pull_request' && github.event.action != 'closed'
+      vars.APP_DELIVERY_ENABLED == 'true'
+      && github.event_name == 'pull_request' && github.event.action != 'closed'
       && github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     outputs:
@@ -104,7 +113,8 @@ jobs:
 
   remove-preview:
     if: >-
-      github.event_name == 'pull_request' && github.event.action == 'closed'
+      vars.APP_DELIVERY_ENABLED == 'true'
+      && github.event_name == 'pull_request' && github.event.action == 'closed'
       && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: feature

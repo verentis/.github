@@ -51,8 +51,16 @@ permissions:
   id-token: write
 
 jobs:
+  delivery-disabled:
+    if: vars.APP_DELIVERY_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: >-
+          echo "::notice::App delivery is disabled for this repository. The platform's bootstrap-app-repos workflow
+          creates its environments and identities and then sets the repository variable APP_DELIVERY_ENABLED=true."
+
   plan:
-    if: github.ref == 'refs/heads/main'
+    if: vars.APP_DELIVERY_ENABLED == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.plan.outputs.packages }}

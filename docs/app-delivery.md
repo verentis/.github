@@ -178,6 +178,12 @@ Pull request workflows run the pull request's own code, including `.github/` and
 namespace, the Access service token) and never reuse production values there. Production environments accept
 deployments from `main` only; protect `main` with required reviews so only reviewed code reaches them.
 
+## Enabling delivery
+
+Delivery is inert until the repository variable `APP_DELIVERY_ENABLED` is `true`; until then the workflows only print a
+notice, so pushing a repository before its environments exist never creates unprotected environments. The platform's
+`bootstrap-app-repos` workflow sets it after creating the environments, identities and variables.
+
 ## GitHub environments of an app repository
 
 Created and filled by the platform's repository bootstrap; listed here so a missing value is easy to diagnose.
