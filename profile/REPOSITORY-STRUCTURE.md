@@ -97,12 +97,9 @@ Collection repositories should call the organization workflows in `.github/workf
 
 - `discover-verentis-packages.yml` builds a changed-package matrix from application and engine manifests;
 - `validate-verentis-package.yml` validates one independently packaged root;
-- `publish-verentis-package.yml` validates, versions, packs, and publishes one package.
-- `publish-verentis-package-sprint.yml` uses a protected `sprint` environment, GitVersion,
-  publisher GitHub federation, and a developer signing key to publish each production-overlay
-  package to Sprint. Its callers must pass the repository-accessible organization secrets
-  `SPRINT_API_URL` and `PUBLISHER_SIGNING_KEY`, request `id-token: write`, and register their
-  repository/environment as a federated credential on the Sprint publisher before publishing.
+- `app-release.yml` (push to `main`) and `app-pull-request.yml` (pull requests) deliver hosted apps and publish
+  packages to the feature and production registries; versions come from GitVersion (`actions/resolve-version`).
+  See [`docs/app-delivery.md`](https://github.com/verentis/.github/blob/main/docs/app-delivery.md).
 
 Repository-level shared paths can deliberately invalidate every package. Package-specific changes should
 validate and release only the owning package root.
