@@ -3,7 +3,8 @@ name: Verentis app pull request
 # Trunk-based preview for app repositories. Call it from the repository's pull_request workflow:
 #   - opened / synchronize / reopened / ready_for_review: every changed hosted app is built and deployed to the feature
 #     environment as <name>-pr-<n>.<apps domain>, and every changed package (and the package of every changed hosted
-#     app) is published to the feature registry as <major>.<minor>.<next>-pr.<n>.<run>, pointing at that preview host.
+#     app) is published to the feature registry as <next version>-pr.<n>.<run>.<attempt> (resolve-version, GitVersion),
+#     pointing at that preview host.
 #   - closed (merged or not): the preview copies are removed. The release workflow on main takes over after a merge.
 # Fork and draft pull requests get no preview (no secrets / not ready).
 
@@ -55,8 +56,7 @@ jobs:
       hosted: ${{ steps.plan.outputs.hosted }}
       has-packages: ${{ steps.plan.outputs.has-packages }}
       has-hosted: ${{ steps.plan.outputs.has-hosted }}
-      sequence: ${{ steps.version.outputs.sequence }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -68,14 +68,11 @@ jobs:
           hosted-follows-package: 'true'
           shared-paths: ${{ inputs.shared-paths }}
       - id: version
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          # The next main commit's sequence, so the preview sorts below the release that merges it.
-          echo "sequence=$(( $(git rev-list --first-parent --count "$BASE_SHA") + 1 ))" >> "$GITHUB_OUTPUT"
-          echo "prerelease=pr.${PR_NUMBER}.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+        if: steps.plan.outputs.has-packages == 'true'
+        uses: verentis/.github/.github/actions/resolve-version@main
+        with:
+          mode: preview
+          prerelease: pr.${{ github.event.pull_request.number }}.${{ github.run_number }}.${{ github.run_attempt }}
 
   hosted:
     needs: plan
@@ -103,8 +100,7 @@ jobs:
       target: feature
       package-root: ${{ matrix.package-root }}
       manifest: ${{ matrix.manifest }}
-      sequence: ${{ needs.plan.outputs.sequence }}
-      prerelease: ${{ needs.plan.outputs.prerelease }}
+      version: ${{ needs.plan.outputs.version }}
       host-suffix: -pr-${{ github.event.pull_request.number }}
       visibility: ${{ inputs.visibility }}
       build-target: ${{ inputs.build-target }}

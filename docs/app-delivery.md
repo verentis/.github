@@ -5,7 +5,7 @@ requests into `main`, and a staged production rollout on merge. Nothing is rebui
 
 | Event | What happens | Where |
 |---|---|---|
-| Pull request opened / updated (same repository, not draft) | Changed hosted apps are built and deployed as `<name>-pr-<n>.<apps domain>`; changed packages are published as `<major>.<minor>.<next>-pr.<n>.<run>.<attempt>`, pointing at the preview host | `feature` environment (internal, behind Cloudflare Access) |
+| Pull request opened / updated (same repository, not draft) | Changed hosted apps are built and deployed as `<name>-pr-<n>.<apps domain>`; changed packages are published as `<next version>-pr.<n>.<run>.<attempt>`, pointing at the preview host | `feature` environment (internal, behind Cloudflare Access) |
 | Pull request closed or merged | The preview copies are removed (`verentis.io/pr=<n>` label). An `expires-at` annotation lets the platform reaper remove leftovers | `feature` |
 | Push to `main` (the merge) | Each changed hosted app: build once → `feature` (stable host) → first production region + observation window → remaining regions one at a time. Then each changed package: `feature` registry → global production registry, which distributes it to the regions | `feature`, `production-eus`, `production-nz`, `production-za`, `production` |
 
@@ -35,6 +35,8 @@ jobs:
     secrets: inherit
 ```
 
+Also add `GitVersion.yml` at the repository root (copy it from any app repository).
+
 `.github/workflows/release.yml`
 
 ```yaml
@@ -49,7 +51,7 @@ on:
         type: boolean
         default: false
 permissions:
-  contents: read
+  contents: write  # the release tags its commit v<version> (GitVersion)
   id-token: write
 concurrency:
   group: release
@@ -162,10 +164,17 @@ hosts need no `feature.yaml`; a package that has `production.yaml` must also hav
 
 ## Versions
 
-`<major>.<minor>` come from `metadata.version` in the manifest (bump them by hand for a breaking or feature
-release); the patch is the first-parent commit count of `main` (use squash merges), so every merge is a new, increasing version and nothing is
-written back to the repository. Pull request previews use the next patch with a `-pr.<n>.<run>.<attempt>`
-prerelease, which sorts below the release that merges them.
+Versions come from **GitVersion** (`resolve-version` action), one version per repository and release, the same way
+the CLI and SDK are versioned. Each repository has a `GitVersion.yml` at its root (main: empty label, patch
+increment). A release on `main` takes the last `v<version>` tag plus one patch and pushes `v<version>` to the commit,
+which reserves the version: the next merge counts on from it, and re-running the same commit gets the same version.
+Nothing is written back to the manifest; `metadata.version` in the repository is ignored at publish time.
+
+- **Patch:** automatic, one per release.
+- **Minor or major:** push a tag to the last released commit (for example `git tag v1.3.0` before the next merge),
+  or include `+semver: minor` / `+semver: major` in the merge commit message.
+- **Pull request previews:** the next version with a `-pr.<n>.<run>.<attempt>` prerelease, which sorts below the
+  release that merges them.
 
 Re-running a release is safe: images are pinned by digest, and publishing a version whose content is identical
 to what the registry holds is a no-op (a different package under an existing version still fails).

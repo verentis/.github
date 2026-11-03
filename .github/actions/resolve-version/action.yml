@@ -1,0 +1,80 @@
+name: Resolve Verentis version
+description: >-
+  Computes the repository's version with GitVersion 6 from its GitVersion.yml (main: last v<version> tag plus one patch,
+  as the CLI and SDK do). A release reserves its version by pushing the tag v<version> to the commit, so the next main
+  commit counts on from it and a re-run of the same commit gets the same version. A preview is the next version with a
+  prerelease label, so it sorts below the release that merges it. Needs a checkout with full history and tags
+  (fetch-depth: 0); a release that tags needs contents: write.
+
+inputs:
+  mode:
+    description: release (main; tags the commit unless tag is false) or preview (needs prerelease)
+    required: true
+  prerelease:
+    description: Prerelease label for a preview, for example pr.12.345.1
+    required: false
+    default: ''
+  tag:
+    description: Push v<version> to the commit (release mode)
+    required: false
+    default: 'true'
+
+outputs:
+  version:
+    description: The version to publish
+    value: ${{ steps.resolve.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check GitVersion configuration
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -f GitVersion.yml || { echo "::error::GitVersion.yml is missing at the repository root"; exit 1; }
+        [[ "$(git rev-parse --is-shallow-repository)" == false ]] || { echo "::error::Check out with fetch-depth: 0"; exit 1; }
+
+    - uses: gittools/actions/gitversion/setup@v4.7.0
+      with:
+        versionSpec: '6.x'
+
+    - id: gitversion
+      uses: gittools/actions/gitversion/execute@v4.7.0
+
+    - id: resolve
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        PRERELEASE: ${{ inputs.prerelease }}
+        TAG: ${{ inputs.tag }}
+        SEMVER: ${{ steps.gitversion.outputs.semVer }}
+        MAJOR_MINOR_PATCH: ${{ steps.gitversion.outputs.majorMinorPatch }}
+        REF: ${{ github.ref }}
+      run: |
+        set -euo pipefail
+        [[ "$MAJOR_MINOR_PATCH" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::GitVersion returned no version"; exit 1; }
+        case "$MODE" in
+          release)
+            [[ "$REF" == refs/heads/main ]] || { echo "::error::Releases are versioned from main only"; exit 1; }
+            [[ "$SEMVER" == "$MAJOR_MINOR_PATCH" ]] \
+              || { echo "::error::GitVersion gave main the prerelease $SEMVER; the main label in GitVersion.yml must be empty"; exit 1; }
+            version="$MAJOR_MINOR_PATCH"
+            if [[ "$TAG" == true ]]; then
+              tag="v$version"
+              if existing=$(git rev-parse -q --verify "refs/tags/$tag^{commit}"); then
+                [[ "$existing" == "$(git rev-parse HEAD)" ]] \
+                  || { echo "::error::$tag already exists on $existing; another release took this version"; exit 1; }
+              else
+                git tag "$tag" HEAD
+                git push origin "refs/tags/$tag"
+              fi
+            fi
+            ;;
+          preview)
+            [[ "$PRERELEASE" =~ ^[0-9A-Za-z][0-9A-Za-z.-]*$ ]] || { echo "::error::A preview needs a prerelease label"; exit 1; }
+            version="$MAJOR_MINOR_PATCH-$PRERELEASE"
+            ;;
+          *) echo "::error::mode must be release or preview"; exit 1 ;;
+        esac
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "Version: \`$version\`" >> "$GITHUB_STEP_SUMMARY"

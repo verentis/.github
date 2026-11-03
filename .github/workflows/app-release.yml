@@ -3,8 +3,9 @@ name: Verentis app release
 # Trunk-based release for app repositories. Call it from the repository's push-to-main workflow. For every changed
 # hosted app the image is built once and the same digest goes to the feature environment, then the first production
 # region (with an observation window), then the remaining regions one at a time. After every hosted app is live,
-# each changed package is published as <major>.<minor>.<first-parent commit count of main>: first to the feature
-# registry, then to the global production registry, which distributes it to the regions. Package assets are built
+# each changed package is published with the repository's GitVersion version (resolve-version: last v<version> tag plus
+# one patch; the run tags the commit v<version>): first to the feature registry, then to the global production
+# registry, which distributes it to the regions. Package assets are built
 # once (build-verentis-package-assets.yml) and packed from that artifact for both targets with one pinned CLI
 # version; publishing an identical package again (a re-run) is a no-op. Nothing is rebuilt between stages.
 
@@ -67,8 +68,10 @@ jobs:
       hosted: ${{ steps.plan.outputs.hosted }}
       has-packages: ${{ steps.plan.outputs.has-packages }}
       has-hosted: ${{ steps.plan.outputs.has-hosted }}
-      sequence: ${{ steps.version.outputs.sequence }}
-      cli-version: ${{ steps.version.outputs.cli-version }}
+      version: ${{ steps.version.outputs.version }}
+      cli-version: ${{ steps.cli.outputs.cli-version }}
+    permissions:
+      contents: write  # resolve-version pushes the release tag v<version>
     steps:
       - uses: actions/checkout@v5
         with:
@@ -90,11 +93,13 @@ jobs:
           base-sha: ${{ steps.base.outputs.sha }}
           shared-paths: ${{ inputs.shared-paths }}
       - id: version
-        run: |
-          set -euo pipefail
-          echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
-          # Every target of this release packs with the same CLI.
-          echo "cli-version=$(npm view @verentis/cli version)" >> "$GITHUB_OUTPUT"
+        if: steps.plan.outputs.has-packages == 'true' || steps.plan.outputs.has-hosted == 'true'
+        uses: verentis/.github/.github/actions/resolve-version@main
+        with:
+          mode: release
+      - id: cli
+        # Every target of this release packs with the same CLI.
+        run: echo "cli-version=$(npm view @verentis/cli version)" >> "$GITHUB_OUTPUT"
 
   hosted:
     needs: plan
@@ -136,7 +141,7 @@ jobs:
       target: feature
       package-root: ${{ matrix.package-root }}
       manifest: ${{ matrix.manifest }}
-      sequence: ${{ needs.plan.outputs.sequence }}
+      version: ${{ needs.plan.outputs.version }}
       visibility: ${{ inputs.visibility }}
       prebuilt-assets: true
       cli-version: ${{ needs.plan.outputs.cli-version }}
@@ -154,7 +159,7 @@ jobs:
       target: production
       package-root: ${{ matrix.package-root }}
       manifest: ${{ matrix.manifest }}
-      sequence: ${{ needs.plan.outputs.sequence }}
+      version: ${{ needs.plan.outputs.version }}
       visibility: ${{ inputs.visibility }}
       prebuilt-assets: true
       cli-version: ${{ needs.plan.outputs.cli-version }}

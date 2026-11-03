@@ -5,7 +5,8 @@ name: Publish Verentis package to a target
 # service token. Publishing authenticates with the job's GitHub OIDC token against the publisher's pipeline trust,
 # which is bound to this repository and that environment.
 #
-# Version: <major>.<minor> from the manifest, patch = the main-branch commit sequence, plus an optional prerelease.
+# Version: computed once per run by the caller with the resolve-version action (GitVersion); stable on main, a
+# prerelease for pull request previews.
 # Overlay: environments/<target>.yaml when present. ${param:app-host}, ${param:apps-domain} and
 # ${param:host-suffix} resolve to the package's hosted app on that target.
 
@@ -22,14 +23,9 @@ on:
       manifest:
         required: true
         type: string
-      sequence:
-        description: Patch number (main-branch commit count)
+      version:
+        description: Package version from the resolve-version action (for example 1.4.2 or 1.4.3-pr.12.345.1)
         required: true
-        type: string
-      prerelease:
-        description: Optional prerelease label, for example pr.12.345
-        required: false
-        default: ''
         type: string
       host-suffix:
         description: Hosted-app host suffix for this publication (for example -pr-12)
@@ -91,17 +87,15 @@ jobs:
       - name: Check inputs
         env:
           TARGET: ${{ inputs.target }}
-          SEQUENCE: ${{ inputs.sequence }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          VERSION: ${{ inputs.version }}
           VISIBILITY: ${{ inputs.visibility }}
           REGISTRY_URL: ${{ vars.VERENTIS_REGISTRY_URL }}
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           [[ "$TARGET" == feature || "$TARGET" == production ]] || { echo "::error::Unknown target $TARGET"; exit 1; }
-          [[ "$SEQUENCE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid sequence"; exit 1; }
-          [[ -z "$PRERELEASE" || "$PRERELEASE" =~ ^[0-9A-Za-z.-]+$ ]] || { echo "::error::Invalid prerelease"; exit 1; }
-          [[ "$TARGET" != production || ( -z "$PRERELEASE" && "$REF" == refs/heads/main ) ]] \
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "::error::Invalid version $VERSION"; exit 1; }
+          [[ "$TARGET" != production || ( "$VERSION" != *-* && "$REF" == refs/heads/main ) ]] \
             || { echo "::error::Production publishes only stable versions from main"; exit 1; }
           [[ "$VISIBILITY" == Private || "$VISIBILITY" == Public ]] || { echo "::error::Invalid visibility"; exit 1; }
           [[ "$REGISTRY_URL" =~ ^https://[a-z0-9.-]+$ ]] || { echo "::error::VERENTIS_REGISTRY_URL must be an https origin"; exit 1; }
@@ -170,24 +164,11 @@ jobs:
             npm run build --workspace "$BUILD_TARGET"
           fi
 
-      - name: Resolve version
-        id: version
-        working-directory: ${{ inputs.package-root }}
-        env:
-          MANIFEST: ${{ inputs.manifest }}
-          SEQUENCE: ${{ inputs.sequence }}
-          PRERELEASE: ${{ inputs.prerelease }}
-        run: |
-          set -euo pipefail
-          base=$(yq -r '.metadata.version' "$MANIFEST")
-          [[ "$base" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+ ]] || { echo "::error::metadata.version must be semver"; exit 1; }
-          echo "version=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${SEQUENCE}${PRERELEASE:+-$PRERELEASE}" >> "$GITHUB_OUTPUT"
-
       - name: Prepare
         if: inputs.prepare != ''
         env:
           PREPARE: ${{ inputs.prepare }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ inputs.version }}
           IMAGE: ${{ inputs.image }}
         run: |
           set -euo pipefail
@@ -204,7 +185,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           PACKAGE_ROOT: ${{ inputs.package-root }}
           MANIFEST: ${{ inputs.manifest }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ inputs.version }}
           HOST_SUFFIX: ${{ inputs.host-suffix }}
           APPS_DOMAIN: ${{ vars.APPS_DOMAIN }}
           PUBLISHER_SIGNING_KEY: ${{ secrets.PUBLISHER_SIGNING_KEY }}
