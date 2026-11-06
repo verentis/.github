@@ -1,8 +1,8 @@
 name: Build Verentis package assets
 
-# Builds one package's assets once (npm ci + the package's build target) and uploads its package root as a run
-# artifact. The feature and production publications then pack that same content, so production never receives a
-# rebuild of what was tested on feature. Everything a package can contain lives under its package root.
+# Builds one package's assets once (npm ci + the package's build target, no tests) and uploads its package root as a
+# run artifact. The release's production publication packs that content, so a re-run of a failed publish never
+# rebuilds. Everything a package can contain lives under its package root.
 
 on:
   workflow_call:

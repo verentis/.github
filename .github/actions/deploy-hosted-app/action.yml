@@ -1,9 +1,11 @@
 name: Deploy a Verentis hosted app
 description: >-
   Renders one hosted app for the target selected by the calling job's GitHub environment, applies it to the
-  already-provisioned apps namespace, waits for the rollout, and checks health against the target's own ingress
-  (never through the edge), optionally for an observation window. The caller logs in to Azure and installs
-  kubectl and kubelogin first (clusters are Entra-integrated with local accounts disabled).
+  already-provisioned apps namespace and waits for the rollout; a deployment succeeds when Kubernetes reports every
+  listed Deployment rolled out (readiness probes). Pull request previews (pr-number set) additionally get the app's
+  HTTP checks against the target's own ingress (never through the edge); production deploys run no HTTP tests.
+  The caller logs in to Azure and installs kubectl and kubelogin first (clusters are Entra-integrated with local
+  accounts disabled).
 
 inputs:
   app:
@@ -24,10 +26,6 @@ inputs:
     description: Preview copies get a verentis.io/expires-at annotation this many hours ahead (reaper safety net)
     required: false
     default: '72'
-  observe-seconds:
-    description: Keep probing health for this long after the rollout (0 = single check)
-    required: false
-    default: '0'
   aks-resource-group:
     required: true
     description: AKS resource group of the target cluster
@@ -63,7 +61,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Render, apply and verify
+    - name: Render, apply and wait for the rollout
       shell: bash
       env:
         APP: ${{ inputs.app }}
@@ -71,7 +69,6 @@ runs:
         HOST_SUFFIX: ${{ inputs.host-suffix }}
         PR_NUMBER: ${{ inputs.pr-number }}
         EXPIRES_HOURS: ${{ inputs.expires-hours }}
-        OBSERVE_SECONDS: ${{ inputs.observe-seconds }}
         AKS_RESOURCE_GROUP: ${{ inputs.aks-resource-group }}
         AKS_CLUSTER_NAME: ${{ inputs.aks-cluster-name }}
         NAMESPACE: ${{ inputs.namespace }}
@@ -173,23 +170,17 @@ runs:
         images=$(kubectl get deployment "${deployments[@]}" -n "$NAMESPACE" -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}')
         grep -qxF "$IMAGE" <<< "$images" || { echo "::error::No deployment runs $IMAGE"; exit 1; }
 
-        mapfile -t checks < <(jq -r --arg suffix "$HOST_SUFFIX" --arg domain "$APPS_DOMAIN" --arg name "$name" \
-          '(.health // [{path: "/"}]) | .[] | "\((.host // $name) + $suffix + "." + $domain) \(.path)"' <<< "$APP")
-        probe() {
-          local host path args
+        # HTTP checks are pull request tests: they run against previews only, never after a production rollout.
+        if [[ -n "$PR_NUMBER" ]]; then
+          mapfile -t checks < <(jq -r --arg suffix "$HOST_SUFFIX" --arg domain "$APPS_DOMAIN" --arg name "$name" \
+            '(.health // [{path: "/"}]) | .[] | "\((.host // $name) + $suffix + "." + $domain) \(.path)"' <<< "$APP")
           for check in "${checks[@]}"; do
             read -r host path <<< "$check"
-            args=(--fail --silent --show-error --max-time 15 -o /dev/null)
+            # Retries wait for certificates and endpoints.
+            args=(--fail --silent --show-error --max-time 15 -o /dev/null --retry 20 --retry-delay 10 --retry-all-errors)
             if [[ -n "$INGRESS_IP" ]]; then args+=(--resolve "$host:443:$INGRESS_IP"); fi
             if [[ -n "$ACCESS_HEADER_VALUE" ]]; then args+=(-H "X-Verentis-Test-Access: $ACCESS_HEADER_VALUE"); fi
-            curl "${args[@]}" "$@" "https://$host$path" || { echo "::error::Health check failed: https://$host$path"; return 1; }
+            curl "${args[@]}" "https://$host$path" || { echo "::error::Preview check failed: https://$host$path"; exit 1; }
           done
-        }
-        # First check waits for certificates and endpoints; later checks must pass every time.
-        probe --retry 20 --retry-delay 10 --retry-all-errors
-        if (( OBSERVE_SECONDS > 0 )); then
-          end=$((SECONDS + OBSERVE_SECONDS))
-          while (( SECONDS < end )); do sleep 15; probe; done
-          echo "Observed $APP_NAME healthy for ${OBSERVE_SECONDS}s"
         fi
         echo "### $APP_NAME → https://$HOST ($AKS_CLUSTER_NAME)" >> "$GITHUB_STEP_SUMMARY"

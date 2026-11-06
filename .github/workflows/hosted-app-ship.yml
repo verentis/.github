@@ -1,12 +1,14 @@
 name: Ship a Verentis hosted app
 
 # Builds one hosted app's image once and rolls the same digest out:
-#   pr       -> the feature environment as <name>-pr-<n> (a preview copy, removed when the PR closes)
-#   release  -> the feature environment as <name>, then the first production region with an observation window,
-#               then the remaining regions one at a time, each job needing the previous one (explicit order, up to
-#               four regions). A failure stops every later region.
-# Every target is a GitHub environment of the calling repository (feature, production-eus, ...) whose variables
-# point at that cluster; production environments only accept deployments from main.
+#   pr       -> the feature environment as <name>-pr-<n> (a preview copy, removed when the PR closes); the image is
+#               built with the feature environment's registry credentials
+#   release  -> the production regions one at a time, each job needing the previous one (explicit order, up to four
+#               regions); the image is built with the `build` environment's registry credentials. A failure stops
+#               every later region; re-running the failed job redeploys the same digest without rebuilding. No tests
+#               run on this path: a region succeeds when Kubernetes reports the rollout complete.
+# Every deploy target is a GitHub environment of the calling repository (feature, production-eus, ...) whose
+# variables point at that cluster; production environments only accept deployments from main.
 
 on:
   workflow_call:
@@ -28,11 +30,6 @@ on:
         required: false
         default: '["production-eus", "production-nz", "production-za"]'
         type: string
-      observe-seconds:
-        description: Observation window after the first production region
-        required: false
-        default: '600'
-        type: string
     outputs:
       image:
         description: The deployed image (repository@digest)
@@ -46,7 +43,8 @@ jobs:
   build:
     name: Build ${{ fromJSON(inputs.app).name }}
     runs-on: ubuntu-latest
-    environment: feature
+    # Registry push credentials: `build` for releases, `feature` for pull request previews.
+    environment: ${{ inputs.mode == 'release' && 'build' || 'feature' }}
     outputs:
       image: ${{ steps.ref.outputs.image }}
       region-1: ${{ steps.ref.outputs.region-1 }}
@@ -88,7 +86,7 @@ jobs:
           ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
         run: |
           set -euo pipefail
-          test -n "$ACR_LOGIN_SERVER" || { echo "::error::Missing ACR_LOGIN_SERVER on the feature environment"; exit 1; }
+          test -n "$ACR_LOGIN_SERVER" || { echo "::error::Missing ACR_LOGIN_SERVER on the build/feature environment"; exit 1; }
           {
             echo "repository=$ACR_LOGIN_SERVER/$(jq -r '.image' <<< "$APP")"
             echo "context=$(jq -r '.context // ."package-root"' <<< "$APP")"
@@ -127,6 +125,8 @@ jobs:
   feature:
     name: feature ${{ fromJSON(inputs.app).name }}
     needs: build
+    # Pull request previews only; a release goes straight to production.
+    if: inputs.mode == 'pr'
     runs-on: ubuntu-latest
     environment: feature
     timeout-minutes: 30
@@ -170,12 +170,12 @@ jobs:
         run: bash -euo pipefail -c "$CHECK"
 
   region-1:
-    name: ${{ needs.build.outputs.region-1 }} ${{ fromJSON(inputs.app).name }} (first production region (+ observation))
-    needs: [build, feature]
+    name: ${{ needs.build.outputs.region-1 }} ${{ fromJSON(inputs.app).name }} (production region 1)
+    needs: build
     if: inputs.mode == 'release' && needs.build.outputs.region-1 != ''
     runs-on: ubuntu-latest
     environment: ${{ needs.build.outputs.region-1 }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: azure/login@v3
@@ -194,7 +194,6 @@ jobs:
         with:
           app: ${{ inputs.app }}
           image: ${{ needs.build.outputs.image }}
-          observe-seconds: ${{ inputs.observe-seconds }}
           aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
           aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
           namespace: ${{ vars.APPS_NAMESPACE }}
@@ -229,7 +228,6 @@ jobs:
         with:
           app: ${{ inputs.app }}
           image: ${{ needs.build.outputs.image }}
-          observe-seconds: '0'
           aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
           aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
           namespace: ${{ vars.APPS_NAMESPACE }}
@@ -264,7 +262,6 @@ jobs:
         with:
           app: ${{ inputs.app }}
           image: ${{ needs.build.outputs.image }}
-          observe-seconds: '0'
           aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
           aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
           namespace: ${{ vars.APPS_NAMESPACE }}
@@ -299,7 +296,6 @@ jobs:
         with:
           app: ${{ inputs.app }}
           image: ${{ needs.build.outputs.image }}
-          observe-seconds: '0'
           aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
           aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
           namespace: ${{ vars.APPS_NAMESPACE }}

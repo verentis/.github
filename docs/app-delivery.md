@@ -1,16 +1,18 @@
 # App delivery (trunk based)
 
 App, engine and package repositories deliver the same way as the platform: short-lived feature branches, pull
-requests into `main`, and a staged production rollout on merge. Nothing is rebuilt between stages.
+requests into `main`, and a direct production release on merge. Tests belong to the pull request; after the merge,
+`main` only builds, packages and deploys production. Nothing is rebuilt between regions.
 
 | Event | What happens | Where |
 |---|---|---|
 | Pull request opened / updated (same repository, not draft) | Changed hosted apps are built and deployed as `<name>-pr-<n>.<apps domain>`; changed packages are published as `<next version>-pr.<n>.<run>.<attempt>`, pointing at the preview host | `feature` environment (internal, behind Cloudflare Access) |
 | Pull request closed or merged | The preview copies are removed (`verentis.io/pr=<n>` label). An `expires-at` annotation lets the platform reaper remove leftovers | `feature` |
-| Push to `main` (the merge) | Each changed hosted app: build once → `feature` (stable host) → first production region + observation window → remaining regions one at a time. Then each changed package: `feature` registry → global production registry, which distributes it to the regions | `feature`, `production-eus`, `production-nz`, `production-za`, `production` |
+| Push to `main` (the merge) | Each changed hosted app: build once → production regions one at a time, the same digest everywhere; a region succeeds when its rollout completes (readiness probes). Then each changed package is published to the global production registry, which distributes it to the regions. No tests, health checks or observation windows run on this path | `build` (image), `production-eus`, `production-nz`, `production-za`, `production` |
 
-A failed stage stops every later stage. Healthy regions are never rolled back automatically; re-run the failed job
-after fixing, or revert the commit on `main` (which ships the previous code as a new version).
+A failed region stops every later region. Healthy regions are never rolled back automatically; re-run the failed job
+after fixing (it redeploys the same digest without rebuilding), or revert the commit on `main` (which ships the
+previous code as a new version).
 
 ## Repository wiring
 
@@ -67,16 +69,21 @@ jobs:
 Validation (`validate-verentis-package.yml`) keeps running on every pull request and validates every
 `environments/*.yaml` overlay (and the bare manifest when it has no non-local overlays).
 
-To gate shipping on repository checks, make the checks workflow callable (`on: workflow_call`) and have the
-`delivery` job need it:
+Repository tests (unit, contract, browser, image smoke, load) run in pull request workflows only, never from
+`release.yml` or another workflow triggered by a push to `main`. To deploy a preview only after the checks pass, make
+the checks workflow callable (`on: workflow_call`) and have the pull request's `delivery` job need it, keeping close
+cleanup independent:
 
 ```yaml
 jobs:
   checks:
+    if: github.event.action != 'closed'
     uses: ./.github/workflows/checks.yml
   delivery:
     needs: checks
-    uses: verentis/.github/.github/workflows/app-release.yml@main
+    # A closed pull request skips the checks but must still remove its preview.
+    if: ${{ !cancelled() && (needs.checks.result == 'success' || github.event.action == 'closed') }}
+    uses: verentis/.github/.github/workflows/app-pull-request.yml@main
     secrets: inherit
 ```
 
@@ -114,9 +121,9 @@ here; packages without an entry are package-only.
 | `secrets` | no | Names of environment secrets (for example `["CODE_PROOF_KEY"]`) exported to `pre-deploy` and `render` only; a missing one fails the deploy |
 | `node` | no | `true` runs `npm ci` before `pre-deploy`/`render` |
 | `deployments` | no | Deployment names (without suffix) to wait for. Default `[name]` |
-| `health` | no | `[{ "host": "<prefix>", "path": "/_ready" }]`; `host` defaults to `name`. Checked against the target's ingress IP, never through the edge |
+| `health` | no | `[{ "host": "<prefix>", "path": "/_ready" }]`; `host` defaults to `name`. Checked against pull request previews through the target's ingress IP, never through the edge; production deploys rely on the workload's readiness probes and run no HTTP checks |
 | `paths` | no | Path prefixes that trigger a ship. Default `[package-root]` |
-| `feature-check` | no | Command run after the feature deploy with `APP_URL`, `PLATFORM_ORIGIN`, `ACCESS_CF_CLIENT_ID/SECRET` |
+| `feature-check` | no | Command run after a pull request preview deploy to `feature` with `APP_URL`, `PLATFORM_ORIGIN`, `ACCESS_CF_CLIENT_ID/SECRET`; never on the release path |
 
 Per-package publish settings live next to `hosted` and override the workflow's `build-target` input:
 
@@ -141,18 +148,19 @@ preview host that does not exist.
 Rules enforced at deploy time: the image is pinned by digest; every object is namespaced to the target's apps
 namespace (nothing cluster-scoped) and is one of Deployment, Service, Ingress, ConfigMap, Secret,
 PodDisruptionBudget, HorizontalPodAutoscaler, NetworkPolicy or ServiceAccount (what preview removal deletes);
-placeholders must all resolve. Production regions roll out strictly in `production-targets` order (up to four). Ingresses use the platform's wildcard certificate
+placeholders must all resolve. Production regions roll out strictly in `production-targets` order (up to four), and
+a region succeeds when every listed Deployment reports its rollout complete. Ingresses use the platform's wildcard certificate
 (`__TLS_SECRET__`), so no per-app certificate is issued. Internal environments add the access-header check.
 
 All workload names must use `__APP__` (or `APP_NAME` / `HOST_SUFFIX` in a renderer), so previews never collide with
-the stable copy or each other.
+production names or each other.
 
 ## Overlays
 
 | File | Used for | Host |
 |---|---|---|
 | `environments/local.yaml` | `verentis dev` / local Aspire | `<name>.apps.localtest.me` |
-| `environments/feature.yaml` | Pull request previews and the stable feature copy | `https://${param:app-host}` |
+| `environments/feature.yaml` | Pull request previews | `https://${param:app-host}` |
 | `environments/production.yaml` | Production, every region | `https://<name>.apps.verentis.io` |
 
 `${param:apps-domain}` is supplied to every package at publish time (use it to point at another repository's app,
@@ -199,11 +207,13 @@ Created and filled by the platform's repository bootstrap; listed here so a miss
 
 | Environment | Branches | Variables | Secrets |
 |---|---|---|---|
+| `build` | any | `AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME ACR_LOGIN_SERVER` (release image builds) | none |
 | `feature` | any | `AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME ACR_LOGIN_SERVER AKS_RESOURCE_GROUP AKS_CLUSTER_NAME APPS_NAMESPACE APPS_DOMAIN APPS_TLS_SECRET INGRESS_IP PLATFORM_ORIGIN VERENTIS_REGISTRY_URL` | `PUBLISHER_SIGNING_KEY ACCESS_HEADER_VALUE ACCESS_CF_CLIENT_ID ACCESS_CF_CLIENT_SECRET` |
 | `production-<region>` | `main` | `AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AKS_RESOURCE_GROUP AKS_CLUSTER_NAME APPS_NAMESPACE APPS_DOMAIN APPS_TLS_SECRET INGRESS_IP PLATFORM_ORIGIN` | app-specific secrets listed under a hosted app's `secrets` (for example `CODE_PROOF_KEY`, one per environment) |
 | `production` | `main` | `VERENTIS_REGISTRY_URL APPS_DOMAIN` | `PUBLISHER_SIGNING_KEY` |
 
-Each environment federates to its own Azure identity with the least it needs: AcrPush for `feature` builds,
+Each environment federates to its own Azure identity with the least it needs: AcrPush for `build` (release image
+builds) and `feature` (pull request image builds),
 "Azure Kubernetes Service Cluster User Role" on its cluster (to fetch the kubeconfig) and a RoleBinding to the
 `verentis-app-deployer` Role in the apps namespace, nothing else. Clusters are Entra-integrated with local accounts
 disabled, so the workflows convert the kubeconfig with kubelogin (`azure/use-kubelogin`, pinned). The publisher's GitHub pipeline trust
