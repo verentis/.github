@@ -167,7 +167,8 @@ runs:
         for deployment in "${deployments[@]}"; do
           kubectl rollout status deployment/"$deployment" -n "$NAMESPACE" --timeout=10m
         done
-        images=$(kubectl get deployment "${deployments[@]}" -n "$NAMESPACE" -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}')
+        # One named deployment comes back as the object itself, several as a List: read both shapes.
+        images=$(kubectl get deployment "${deployments[@]}" -n "$NAMESPACE" -o json | jq -r '(.items // [.])[] | .spec.template.spec.containers[].image')
         grep -qxF "$IMAGE" <<< "$images" || { echo "::error::No deployment runs $IMAGE"; exit 1; }
 
         # HTTP checks are pull request tests: they run against previews only, never after a production rollout.
