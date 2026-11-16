@@ -1,0 +1,26 @@
+name: User story
+description: A concise, user-focused description of a requirement or functionality
+type: Task
+body:
+  - type: textarea
+    id: story-description
+    attributes:
+      label: User story
+      description: |
+        **Describe the user, their goal, and the benefit.**
+        Follow the format: *"As a [user], I want [goal] so that [benefit]."*
+        *Example: "As an administrator, I want to generate reports so that I can analyze user activity."*
+      placeholder: "As a [user], I want [goal] so that [benefit]"
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: |
+        **State the conditions that must be met for this story to be complete.**
+        *Example: "The dark mode option persists across sessions and is available in the settings menu for all users."*
+      placeholder: Enter acceptance criteria
+    validations:
+      required: true
