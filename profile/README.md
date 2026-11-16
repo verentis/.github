@@ -2,18 +2,9 @@
 
 Verentis is a workspace platform for installable applications, execution engines, and reusable content.
 
-## What's available
+## Open source apps
 
-### [apps](https://github.com/verentis/apps)
-
-Reusable applications you can install into a Verentis workspace, including:
-
-- **Smart editor**
-- **Excalidraw**
-- **Markdown viewer**
-- **CRM**
-- **Accounting**
-
-### [office](https://github.com/verentis/office)
-
-Verentis Office: document editing for workspaces, built on Collabora Online (CODE).
+Some of our apps are open source, and you are welcome to clone them and build whole new apps of your own.
+[**apps**](https://github.com/verentis/apps) includes a smart editor, Excalidraw, a Markdown viewer, a CRM and
+accounting, and [**office**](https://github.com/verentis/office) brings document editing to workspaces, built on
+Collabora Online. Each repository explains how to run, change and publish an app.
