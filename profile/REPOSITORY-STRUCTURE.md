@@ -24,7 +24,7 @@ Dedicated repositories do not use `-application` or `-engine` suffixes. Examples
 Small applications may share a repository when they have the same source visibility and maintainer group,
 use compatible build and CI tooling, and remain independently versioned and publishable.
 
-- `apps` contains reusable applications intended to become public after readiness review.
+- `apps` contains reusable applications. It is public under Apache-2.0.
 - `internal-apps` contains protected and operational applications that remain internal.
 
 Each package lives under `packages/<package-name>/` and owns its manifest, changelog, marketplace assets,
