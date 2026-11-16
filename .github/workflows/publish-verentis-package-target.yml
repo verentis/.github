@@ -89,7 +89,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           VERSION: ${{ inputs.version }}
           VISIBILITY: ${{ inputs.visibility }}
-          REGISTRY_URL: ${{ vars.VERENTIS_REGISTRY_URL }}
+          REGISTRY_URL: ${{ secrets.VERENTIS_REGISTRY_URL || vars.VERENTIS_REGISTRY_URL }}
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
@@ -187,7 +187,7 @@ jobs:
           MANIFEST: ${{ inputs.manifest }}
           VERSION: ${{ inputs.version }}
           HOST_SUFFIX: ${{ inputs.host-suffix }}
-          APPS_DOMAIN: ${{ vars.APPS_DOMAIN }}
+          APPS_DOMAIN: ${{ secrets.APPS_DOMAIN || vars.APPS_DOMAIN }}
           PUBLISHER_SIGNING_KEY: ${{ secrets.PUBLISHER_SIGNING_KEY }}
           VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
         run: |
@@ -240,8 +240,8 @@ jobs:
         env:
           VPKG: ${{ steps.pack.outputs.vpkg }}
           VISIBILITY: ${{ steps.build.outputs.visibility }}
-          VERENTIS_API_URL: ${{ vars.VERENTIS_REGISTRY_URL }}
-          VERENTIS_GITHUB_OIDC_AUDIENCE: ${{ vars.VERENTIS_REGISTRY_URL }}
+          VERENTIS_API_URL: ${{ secrets.VERENTIS_REGISTRY_URL || vars.VERENTIS_REGISTRY_URL }}
+          VERENTIS_GITHUB_OIDC_AUDIENCE: ${{ secrets.VERENTIS_REGISTRY_URL || vars.VERENTIS_REGISTRY_URL }}
           VERENTIS_CF_ACCESS_CLIENT_ID: ${{ secrets.ACCESS_CF_CLIENT_ID }}
           VERENTIS_CF_ACCESS_CLIENT_SECRET: ${{ secrets.ACCESS_CF_CLIENT_SECRET }}
           VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
