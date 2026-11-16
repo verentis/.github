@@ -1,3 +1,5 @@
+![Verentis](./welcome-banner.png)
+
 # Verentis
 
 Verentis is a workspace platform for installable applications, execution engines, and reusable content.
