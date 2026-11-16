@@ -1,0 +1,49 @@
+name: Report a bug
+description: An unexpected problem or behavior
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a bug! Please provide as much detail as possible to help us resolve it efficiently.
+
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: Bug description
+      description: Describe the bug in detail. What did you observe?
+      placeholder: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide a step-by-step guide to reproduce the bug. Include any specific details or conditions.
+      placeholder: "1. Go to...\n2. Click on...\n3. See the error"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+      placeholder: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-information
+    attributes:
+      label: Additional information
+      description: Anything else that might help, such as environment details, screenshots or logs.
+      placeholder: Add any other context about the problem here.
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste secrets, tokens or internal hostnames.** This repository may be public.
+        Report security vulnerabilities privately through the **Security → Report a vulnerability** tab.

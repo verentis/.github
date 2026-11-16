@@ -1,0 +1,28 @@
+name: Feature request
+description: A request, idea, or new functionality
+type: Feature
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to fill out this feature request!
+
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature description
+      description: |
+        **Describe the feature in detail.**
+        Explain the problem this feature solves and why it matters.
+        *Example: "Add a dark mode option to improve usability for users in low-light environments."*
+      placeholder: Enter a detailed description of the feature
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-information
+    attributes:
+      label: Additional information
+      description: Any extra context that might be relevant to the implementation, such as screenshots or links.
+      placeholder: Add any other context about the feature request here.
+    validations:
+      required: false
