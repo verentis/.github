@@ -94,7 +94,7 @@ runs:
         export APP_NAME="${name}${HOST_SUFFIX}"
         export HOST="${APP_NAME}.${APPS_DOMAIN}"
         export IMAGE NAMESPACE APPS_DOMAIN TLS_SECRET PLATFORM_ORIGIN HOST_SUFFIX SOURCE_COMMIT
-        echo "Deploying $APP_NAME to $AKS_CLUSTER_NAME/$NAMESPACE as https://$HOST"
+        echo "Deploying $APP_NAME as https://$HOST"
 
         az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing --only-show-errors
 
@@ -184,4 +184,4 @@ runs:
             curl "${args[@]}" "https://$host$path" || { echo "::error::Preview check failed: https://$host$path"; exit 1; }
           done
         fi
-        echo "### $APP_NAME → https://$HOST ($AKS_CLUSTER_NAME)" >> "$GITHUB_STEP_SUMMARY"
+        echo "### $APP_NAME → https://$HOST" >> "$GITHUB_STEP_SUMMARY"
