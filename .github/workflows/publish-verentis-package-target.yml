@@ -36,6 +36,11 @@ on:
         required: false
         default: Public
         type: string
+      environment:
+        description: GitHub environment to run in when it is not named like the target (empty uses the target); the publishing trust is bound to it
+        required: false
+        default: ''
+        type: string
       publisher:
         description: Publisher to pack and publish under instead of the manifest's packaging.publisher (empty keeps it)
         required: false
@@ -87,7 +92,7 @@ jobs:
   publish:
     name: ${{ inputs.target }} ${{ inputs.package-root }}
     runs-on: ubuntu-latest
-    environment: ${{ inputs.target }}
+    environment: ${{ inputs.environment || inputs.target }}
     steps:
       - name: Check inputs
         env:

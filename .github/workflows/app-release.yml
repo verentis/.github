@@ -26,6 +26,11 @@ on:
         required: false
         default: ''
         type: string
+      additional-publisher-environment:
+        description: GitHub environment for the additional publisher. A trust identifies a publisher by repository and environment, so it must not be the production environment
+        required: false
+        default: ''
+        type: string
       shared-paths:
         description: Newline-separated path prefixes that affect every package and hosted app
         required: false
@@ -152,7 +157,7 @@ jobs:
   publish-production-additional-publisher:
     needs: [plan, publish-production]
     if: >-
-      always() && inputs.additional-publisher != '' && needs.plan.result == 'success'
+      always() && inputs.additional-publisher != '' && inputs.additional-publisher-environment != '' && needs.plan.result == 'success'
       && needs.plan.outputs.has-packages == 'true' && needs.publish-production.result == 'success'
     strategy:
       fail-fast: false
@@ -164,6 +169,7 @@ jobs:
       manifest: ${{ matrix.manifest }}
       version: ${{ needs.plan.outputs.version }}
       visibility: ${{ inputs.visibility }}
+      environment: ${{ inputs.additional-publisher-environment }}
       publisher: ${{ inputs.additional-publisher }}
       prebuilt-assets: true
       cli-version: ${{ needs.plan.outputs.cli-version }}
