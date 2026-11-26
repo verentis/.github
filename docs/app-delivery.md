@@ -224,7 +224,8 @@ left as is), so a publisher with no keys, for example after a data reset, needs 
 An additional publisher (`app-release.yml` inputs `additional-publisher` and `additional-publisher-environment`)
 publishes the same packages again under another publisher name. A trust identifies one publisher by repository and
 environment, so it needs its own environment with `VERENTIS_REGISTRY_URL`, `APPS_DOMAIN` and `PUBLISHER_SIGNING_KEY`,
-and its own trust. `publish-primary: false` skips the manifest's own publisher.
+and its own trust. `additional-publisher-regions` (for example `za`) places its packages in those regions only,
+instead of each manifest's `placement`. `publish-primary: false` skips the manifest's own publisher.
 
 ## Prerequisites
 
