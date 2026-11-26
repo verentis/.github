@@ -31,6 +31,11 @@ on:
         required: false
         default: ''
         type: string
+      publish-primary:
+        description: Publish to the production registry under the manifest's own publisher; false when only the additional publisher should publish
+        required: false
+        default: true
+        type: boolean
       shared-paths:
         description: Newline-separated path prefixes that affect every package and hosted app
         required: false
@@ -136,7 +141,7 @@ jobs:
     needs: [plan, hosted, assets]
     # A package is published only once the hosted apps it points at are deployed.
     if: >-
-      always() && needs.plan.result == 'success' && needs.plan.outputs.has-packages == 'true'
+      always() && inputs.publish-primary && needs.plan.result == 'success' && needs.plan.outputs.has-packages == 'true'
       && needs.assets.result == 'success'
       && (needs.hosted.result == 'success' || needs.hosted.result == 'skipped')
     strategy:
@@ -155,10 +160,12 @@ jobs:
     secrets: inherit
 
   publish-production-additional-publisher:
-    needs: [plan, publish-production]
+    needs: [plan, hosted, assets, publish-production]
     if: >-
-      always() && inputs.additional-publisher != '' && inputs.additional-publisher-environment != '' && needs.plan.result == 'success'
-      && needs.plan.outputs.has-packages == 'true' && needs.publish-production.result == 'success'
+      always() && inputs.additional-publisher != '' && inputs.additional-publisher-environment != ''
+      && needs.plan.result == 'success' && needs.plan.outputs.has-packages == 'true' && needs.assets.result == 'success'
+      && (needs.hosted.result == 'success' || needs.hosted.result == 'skipped')
+      && (needs.publish-production.result == 'success' || (!inputs.publish-primary && needs.publish-production.result == 'skipped'))
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.packages) }}
