@@ -249,7 +249,8 @@ jobs:
             if [[ -n "$ORIGINAL_PUBLISHER" && "$ORIGINAL_PUBLISHER" != "$PUBLISHER" ]]; then
               export ORIGINAL_PUBLISHER PUBLISHER
               for file in "$MANIFEST" "environments/$TARGET.yaml"; do
-                [[ -f "$file" ]] || continue
+                # Overlays without spec must stay that way; a yq update would add spec: null and wipe the manifest spec.
+                [[ -f "$file" && "$(yq -r '.spec | tag' "$file")" == "!!map" ]] || continue
                 yq -i '
                   (.spec | select(tag == "!!map" and has("dependencies")) | .dependencies[]? | select(tag == "!!map") | .package | select(tag == "!!str" and test("^" + strenv(ORIGINAL_PUBLISHER) + "/"))) |= sub("^" + strenv(ORIGINAL_PUBLISHER) + "/"; strenv(PUBLISHER) + "/")
                   | (.spec | select(tag == "!!map" and has("engine")) | .engine | select(tag == "!!str" and test("^" + strenv(ORIGINAL_PUBLISHER) + "/"))) |= sub("^" + strenv(ORIGINAL_PUBLISHER) + "/"; strenv(PUBLISHER) + "/")
