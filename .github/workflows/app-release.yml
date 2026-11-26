@@ -31,6 +31,11 @@ on:
         required: false
         default: ''
         type: string
+      additional-publisher-regions:
+        description: Comma-separated regions the additional publisher's packages are placed in (empty keeps each manifest's placement)
+        required: false
+        default: ''
+        type: string
       publish-primary:
         description: Publish to the production registry under the manifest's own publisher; false when only the additional publisher should publish
         required: false
@@ -177,6 +182,7 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
       visibility: ${{ inputs.visibility }}
       environment: ${{ inputs.additional-publisher-environment }}
+      placement-regions: ${{ inputs.additional-publisher-regions }}
       publisher: ${{ inputs.additional-publisher }}
       prebuilt-assets: true
       cli-version: ${{ needs.plan.outputs.cli-version }}

@@ -41,6 +41,11 @@ on:
         required: false
         default: ''
         type: string
+      placement-regions:
+        description: Comma-separated regions (for example za) that replace the manifest's placement with include-only those regions (empty keeps it)
+        required: false
+        default: ''
+        type: string
       publisher:
         description: Publisher to pack and publish under instead of the manifest's packaging.publisher (empty keeps it)
         required: false
@@ -198,6 +203,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           HOST_SUFFIX: ${{ inputs.host-suffix }}
           PUBLISHER: ${{ inputs.publisher }}
+          PLACEMENT_REGIONS: ${{ inputs.placement-regions }}
           APPS_DOMAIN: ${{ secrets.APPS_DOMAIN || vars.APPS_DOMAIN }}
           PUBLISHER_SIGNING_KEY: ${{ secrets.PUBLISHER_SIGNING_KEY }}
           VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
@@ -238,6 +244,11 @@ jobs:
           if [[ -n "$PUBLISHER" ]]; then
             [[ "$PUBLISHER" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::Invalid publisher"; exit 1; }
             publisher_args=(--publisher "$PUBLISHER")
+          fi
+
+          if [[ -n "$PLACEMENT_REGIONS" ]]; then
+            [[ "$PLACEMENT_REGIONS" =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]] || { echo "::error::Invalid placement-regions"; exit 1; }
+            yq -i '.placement = {"mode": "include", "regions": (strenv(PLACEMENT_REGIONS) | split(","))}' "$MANIFEST"
           fi
 
           verentis validate "$MANIFEST" "${overlay_args[@]}"
