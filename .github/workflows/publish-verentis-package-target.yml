@@ -36,6 +36,11 @@ on:
         required: false
         default: Public
         type: string
+      environment:
+        description: GitHub environment to run in when it is not named like the target (empty uses the target); the publishing trust is bound to it
+        required: false
+        default: ''
+        type: string
       publisher:
         description: Publisher to pack and publish under instead of the manifest's packaging.publisher (empty keeps it)
         required: false
@@ -87,7 +92,7 @@ jobs:
   publish:
     name: ${{ inputs.target }} ${{ inputs.package-root }}
     runs-on: ubuntu-latest
-    environment: ${{ inputs.target }}
+    environment: ${{ inputs.environment || inputs.target }}
     steps:
       - name: Check inputs
         env:
@@ -259,5 +264,9 @@ jobs:
           VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
         run: |
           set -euo pipefail
+          # The pipeline registers its environment's signing key with its publisher; 409 means it already is.
+          if ! out=$(verentis key register --name ci 2>&1); then
+            grep -q '(409)' <<<"$out" || { echo "$out"; exit 1; }
+          fi
           verentis publish "$VPKG" --visibility "$VISIBILITY"
           echo "Published $(basename "$VPKG") (${{ steps.pack.outputs.version }}) to ${{ inputs.target }}" >> "$GITHUB_STEP_SUMMARY"
