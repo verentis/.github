@@ -21,6 +21,11 @@ on:
         required: false
         default: Public
         type: string
+      additional-publisher:
+        description: Also publish every package to the production registry under this publisher (empty for none)
+        required: false
+        default: ''
+        type: string
       shared-paths:
         description: Newline-separated path prefixes that affect every package and hosted app
         required: false
@@ -142,4 +147,24 @@ jobs:
       prebuilt-assets: true
       cli-version: ${{ needs.plan.outputs.cli-version }}
     # Environment secrets (signing key) must be passed through every reusable-workflow hop.
+    secrets: inherit
+
+  publish-production-additional-publisher:
+    needs: [plan, publish-production]
+    if: >-
+      always() && inputs.additional-publisher != '' && needs.plan.result == 'success'
+      && needs.plan.outputs.has-packages == 'true' && needs.publish-production.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.packages) }}
+    uses: verentis/.github/.github/workflows/publish-verentis-package-target.yml@main
+    with:
+      target: production
+      package-root: ${{ matrix.package-root }}
+      manifest: ${{ matrix.manifest }}
+      version: ${{ needs.plan.outputs.version }}
+      visibility: ${{ inputs.visibility }}
+      publisher: ${{ inputs.additional-publisher }}
+      prebuilt-assets: true
+      cli-version: ${{ needs.plan.outputs.cli-version }}
     secrets: inherit
