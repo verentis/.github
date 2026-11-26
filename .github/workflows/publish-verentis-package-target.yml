@@ -244,6 +244,18 @@ jobs:
           if [[ -n "$PUBLISHER" ]]; then
             [[ "$PUBLISHER" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::Invalid publisher"; exit 1; }
             publisher_args=(--publisher "$PUBLISHER")
+            # Same-publisher dependency and engine references must follow the override, or they point at the original publisher.
+            ORIGINAL_PUBLISHER="$(yq -r '.packaging.publisher // ""' "$MANIFEST")"
+            if [[ -n "$ORIGINAL_PUBLISHER" && "$ORIGINAL_PUBLISHER" != "$PUBLISHER" ]]; then
+              export ORIGINAL_PUBLISHER PUBLISHER
+              for file in "$MANIFEST" "environments/$TARGET.yaml"; do
+                [[ -f "$file" ]] || continue
+                yq -i '
+                  (.spec | select(tag == "!!map" and has("dependencies")) | .dependencies[]? | select(tag == "!!map") | .package | select(tag == "!!str" and test("^" + strenv(ORIGINAL_PUBLISHER) + "/"))) |= sub("^" + strenv(ORIGINAL_PUBLISHER) + "/"; strenv(PUBLISHER) + "/")
+                  | (.spec | select(tag == "!!map" and has("engine")) | .engine | select(tag == "!!str" and test("^" + strenv(ORIGINAL_PUBLISHER) + "/"))) |= sub("^" + strenv(ORIGINAL_PUBLISHER) + "/"; strenv(PUBLISHER) + "/")
+                ' "$file"
+              done
+            fi
           fi
 
           if [[ -n "$PLACEMENT_REGIONS" ]]; then
