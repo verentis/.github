@@ -264,5 +264,9 @@ jobs:
           VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
         run: |
           set -euo pipefail
+          # The pipeline registers its environment's signing key with its publisher; 409 means it already is.
+          if ! out=$(verentis key register --name ci 2>&1); then
+            grep -q '(409)' <<<"$out" || { echo "$out"; exit 1; }
+          fi
           verentis publish "$VPKG" --visibility "$VISIBILITY"
           echo "Published $(basename "$VPKG") (${{ steps.pack.outputs.version }}) to ${{ inputs.target }}" >> "$GITHUB_STEP_SUMMARY"

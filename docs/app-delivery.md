@@ -217,7 +217,14 @@ builds) and `feature` (pull request image builds),
 "Azure Kubernetes Service Cluster User Role" on its cluster (to fetch the kubeconfig) and a RoleBinding to the
 `verentis-app-deployer` Role in the apps namespace, nothing else. Clusters are Entra-integrated with local accounts
 disabled, so the workflows convert the kubeconfig with kubelogin (`azure/use-kubelogin`, pinned). The publisher's GitHub pipeline trust
-is bound to this repository and the `feature` / `production` environment.
+is bound to this repository and the `feature` / `production` environment. Each publish registers the environment's
+`PUBLISHER_SIGNING_KEY` with the publisher through that trust (`verentis key register`; an already registered key is
+left as is), so a publisher with no keys, for example after a data reset, needs only its trust.
+
+An additional publisher (`app-release.yml` inputs `additional-publisher` and `additional-publisher-environment`)
+publishes the same packages again under another publisher name. A trust identifies one publisher by repository and
+environment, so it needs its own environment with `VERENTIS_REGISTRY_URL`, `APPS_DOMAIN` and `PUBLISHER_SIGNING_KEY`,
+and its own trust. `publish-primary: false` skips the manifest's own publisher.
 
 ## Prerequisites
 
