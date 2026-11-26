@@ -225,7 +225,9 @@ An additional publisher (`app-release.yml` inputs `additional-publisher` and `ad
 publishes the same packages again under another publisher name. A trust identifies one publisher by repository and
 environment, so it needs its own environment with `VERENTIS_REGISTRY_URL`, `APPS_DOMAIN` and `PUBLISHER_SIGNING_KEY`,
 and its own trust. `additional-publisher-regions` (for example `za`) places its packages in those regions only,
-instead of each manifest's `placement`. `publish-primary: false` skips the manifest's own publisher.
+instead of each manifest's `placement`. `publish-primary: false` skips the manifest's own publisher. Dependency and
+`spec.engine` references to the manifest's own publisher (for example `wholesale-seeds/unified-source`) are rewritten
+to the additional publisher, so its packages depend on each other rather than on the original publisher's.
 
 ## Prerequisites
 
