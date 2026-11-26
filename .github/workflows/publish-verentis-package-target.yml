@@ -36,6 +36,11 @@ on:
         required: false
         default: Public
         type: string
+      publisher:
+        description: Publisher to pack and publish under instead of the manifest's packaging.publisher (empty keeps it)
+        required: false
+        default: ''
+        type: string
       build-target:
         description: >-
           Empty for no build, root for npm run build, or an npm workspace name. A per-package
@@ -187,6 +192,7 @@ jobs:
           MANIFEST: ${{ inputs.manifest }}
           VERSION: ${{ inputs.version }}
           HOST_SUFFIX: ${{ inputs.host-suffix }}
+          PUBLISHER: ${{ inputs.publisher }}
           APPS_DOMAIN: ${{ secrets.APPS_DOMAIN || vars.APPS_DOMAIN }}
           PUBLISHER_SIGNING_KEY: ${{ secrets.PUBLISHER_SIGNING_KEY }}
           VERENTIS_CONFIG_DIR: ${{ runner.temp }}/verentis-config
@@ -223,8 +229,14 @@ jobs:
           printf '%s' "$PUBLISHER_SIGNING_KEY" > "$VERENTIS_CONFIG_DIR/keys/ci.json"
           chmod 600 "$VERENTIS_CONFIG_DIR/keys/ci.json"
 
+          publisher_args=()
+          if [[ -n "$PUBLISHER" ]]; then
+            [[ "$PUBLISHER" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::Invalid publisher"; exit 1; }
+            publisher_args=(--publisher "$PUBLISHER")
+          fi
+
           verentis validate "$MANIFEST" "${overlay_args[@]}"
-          verentis pack . --manifest "$MANIFEST" --set-version "$version" --key ci --out "$RUNNER_TEMP/vpkg" "${overlay_args[@]}"
+          verentis pack . "${publisher_args[@]}" --manifest "$MANIFEST" --set-version "$version" --key ci --out "$RUNNER_TEMP/vpkg" "${overlay_args[@]}"
           mapfile -t packages < <(find "$RUNNER_TEMP/vpkg" -maxdepth 1 -name '*.vpkg' -type f)
           [[ "${#packages[@]}" -eq 1 ]] || { echo "::error::Expected exactly one packed package"; exit 1; }
           verentis verify "${packages[0]}" --key ci
